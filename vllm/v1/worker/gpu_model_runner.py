@@ -2509,7 +2509,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "Non-Attention backend is not supported by V1 "
                     "GPUModelRunner.")
         elif isinstance(kv_cache_spec, MambaSpec):
-                attn_backend_i = self._get_mamba_attention_backend(kv_cache_spec)
+                attn_backend_i = self._get_mamba_attention_backend(
+                    kv_cache_spec)
         else:
             raise ValueError(
                 f"Unknown KV cache spec type: {type(kv_cache_spec)}")
@@ -2577,7 +2578,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_metadata_builders.append(attn_metadata_builder)
             self.is_encoder_only_model = True
 
-    def _get_mamba_attention_backend(self, kv_cache_spec: MambaSpec) -> AttentionBackend:
+    def _get_mamba_attention_backend(
+            self, kv_cache_spec: MambaSpec) -> AttentionBackend:
         if kv_cache_spec.mamba_type == MambaType.MAMBA1:
             return Mamba1AttentionBackend
 

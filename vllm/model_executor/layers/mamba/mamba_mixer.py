@@ -142,7 +142,7 @@ class MambaMixer(MambaBase, CustomOp):
             eps=rms_norm_eps,
             has_weight=rms_norm_has_weight,
         ) if use_rms_norm else None
-        
+
         if envs.VLLM_USE_V1:
             compilation_config = get_current_vllm_config().compilation_config
             if prefix in compilation_config.static_forward_context:
@@ -160,16 +160,18 @@ class MambaMixer(MambaBase, CustomOp):
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
 
-    def forward_cuda(self, hidden_states: torch.Tensor,
+    def forward_cuda(self,
+                     hidden_states: torch.Tensor,
                      mamba_cache_params: Optional[MambaCacheParams] = None):
 
-        attn_metadata: AttentionMetadata | Mamba1AttentionMetadata = get_forward_context().attn_metadata
+        attn_metadata: AttentionMetadata | Mamba1AttentionMetadata = 
+        get_forward_context().attn_metadata
 
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.prefix]
-                    
+
                 mamba1_metadata = attn_metadata
                 assert isinstance(mamba1_metadata, Mamba1AttentionMetadata)
                 query_start_loc = mamba1_metadata.query_start_loc
@@ -186,7 +188,7 @@ class MambaMixer(MambaBase, CustomOp):
             state_indices_tensor = mamba_cache_params.state_indices_tensor
             query_start_loc = attn_metadata.query_start_loc
             context_lens_tensor = attn_metadata.context_lens_tensor
-            
+
             if context_lens_tensor is not None:
                 has_initial_state = context_lens_tensor > 0
 
