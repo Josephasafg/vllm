@@ -27,7 +27,6 @@ from vllm.distributed.parallel_state import (
     prepare_communication_buffer_for_model)
 from vllm.forward_context import DPMetadata, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
@@ -2892,17 +2891,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Set block_size to max_model_len, so that mamba model will always
             # have only one block in the KV cache.
             for layer_name, mamba_module in mamba_layers.items():
-                if isinstance(mamba_module, MambaMixer):
-                    mamba_type = MambaType.MAMBA1
-                else:
-                    mamba_type = MambaType.MAMBA2
-
                 kv_cache_spec[layer_name] = MambaSpec(
                     shapes=mamba_module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len,
                     page_size_padded=page_size_padded,
-                    mamba_type=mamba_type)
+                    mamba_type=mamba_module.mamba_type)
 
         return kv_cache_spec
 

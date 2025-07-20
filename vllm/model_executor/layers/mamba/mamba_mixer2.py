@@ -37,6 +37,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
+from vllm.v1.kv_cache_interface import MambaType
 
 # Added by the IBM Team, 2024
 
@@ -732,6 +733,9 @@ class MambaMixer2(MambaBase, CustomOp):
             conv_kernel=self.conv_kernel_size,
         )
 
+    @property
+    def mamba_type(self) -> MambaType:
+        return MambaType.MAMBA2
 
 def mamba_mixer2(
     hidden_states: torch.Tensor,

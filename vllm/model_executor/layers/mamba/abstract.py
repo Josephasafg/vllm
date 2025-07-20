@@ -5,6 +5,8 @@ from collections.abc import Iterable
 
 import torch
 
+from vllm.v1.kv_cache_interface import MambaType
+
 
 class MambaBase(ABC):
     """
@@ -26,4 +28,9 @@ class MambaBase(ABC):
         For mamba layers this is usually a (conv_state, ssm_state) tuple.
         In this case, returns (conv_state_shape, ssm_state_shape).
         """
+        pass
+    
+    @property
+    @abstractmethod
+    def mamba_type(self) -> MambaType:
         pass
