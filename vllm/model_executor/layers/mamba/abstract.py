@@ -5,8 +5,6 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm.v1.kv_cache_interface import MambaType
-
 
 class MambaBase(ABC):
     """
@@ -32,5 +30,5 @@ class MambaBase(ABC):
 
     @property
     @abstractmethod
-    def mamba_type(self) -> MambaType:
+    def mamba_type(self) -> str:
         pass

@@ -3,7 +3,6 @@
 
 import copy
 from dataclasses import dataclass
-from enum import Enum
 from math import prod
 from typing import Optional
 
@@ -196,24 +195,19 @@ class SlidingWindowSpec(AttentionSpec):
         return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
 
 
-class MambaType(str, Enum):
-    MAMBA1 = "mamba1"
-    MAMBA2 = "mamba2"
-
-
 @dataclass
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtype: torch.dtype
     page_size_padded: Optional[int] = None
-    mamba_type: MambaType = MambaType.MAMBA2
+    mamba_type: str = "mamba2"
 
     def __post_init__(self):
         self.num_elements = sum(prod(shape) for shape in self.shapes)
 
     @property
     def type_id(self) -> str:
-        return f"mamba_{self.shapes}_{self.dtype}"
+        return f"mamba_{self.shapes}_{self.dtype}_{self.mamba_type}"
 
     @property
     def page_size_bytes(self) -> int:
