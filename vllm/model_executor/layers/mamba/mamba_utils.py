@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from vllm import envs
 from vllm.distributed import divide
 
 
@@ -13,12 +14,13 @@ class MambaStateShapeCalculator:
         state_size: int,
         conv_kernel: int,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
-        conv_state_shape = (divide(intermediate_size,
-                                   tp_world_size), conv_kernel - 1)
+        conv_state_shape = (divide(intermediate_size, tp_world_size), conv_kernel - 1)
 
-        temporal_state_shape = (divide(intermediate_size,
-                                       tp_world_size), state_size)
-        return conv_state_shape, temporal_state_shape
+        temporal_state_shape = (divide(intermediate_size, tp_world_size), state_size)
+        if envs.VLLM_USE_V1:
+            return (conv_state_shape[1], conv_state_shape[0]), temporal_state_shape
+        else:
+            return conv_state_shape, temporal_state_shape
 
     @classmethod
     def mamba2_state_shape(
@@ -34,8 +36,7 @@ class MambaStateShapeCalculator:
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
-        n_groups = (n_groups +
-                    cls.extra_groups_for_head_shards(n_groups, tp_world_size))
+        n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
         # heads and n_groups are TP-ed
         conv_dim = intermediate_size + 2 * n_groups * state_size
 
@@ -47,8 +48,7 @@ class MambaStateShapeCalculator:
         # These are not TP-ed as they depend on A, dt_bias, D
         # - they are typically small
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
-        temporal_state_shape = (divide(num_heads,
-                                       tp_world_size), head_dim, state_size)
+        temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
         return conv_state_shape, temporal_state_shape
 
     @classmethod
