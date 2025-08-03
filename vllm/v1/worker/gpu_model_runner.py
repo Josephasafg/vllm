@@ -2851,22 +2851,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_cache_spec.page_size_bytes // get_dtype_size(dtype)
                     )
 
-                    if kv_cache_spec.mamba_type == "mamba1":
-                        state_tensors = self._create_mamba_state_tensors(
-                            raw_tensor=raw_tensor,
-                            dtype=dtype,
-                            num_blocks=num_blocks,
-                            num_element_per_page=num_element_per_page,
-                            shapes=kv_cache_spec.shapes,
+                    state_tensors = []
+                    storage_offset = 0
+                    for shape in kv_cache_spec.shapes:
+                        target_shape = (num_blocks, *shape)
+                        stride = torch.empty(target_shape).stride()
+                        target_stride = (num_element_per_page, *stride[1:])
+                        tensor = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=target_shape,
+                            stride=target_stride,
+                            storage_offset=storage_offset,
                         )
-                    else:
-                        state_tensors = self._create_mamba_state_tensors(
-                            raw_tensor=raw_tensor,
-                            shapes=kv_cache_spec.shapes,
-                            num_blocks=num_blocks,
-                            num_element_per_page=num_element_per_page,
-                            dtype=dtype,
-                        )
+                        state_tensors.append(tensor)
+                        storage_offset += stride[0]
 
                     kv_caches[layer_name] = state_tensors
                 else:
@@ -3115,112 +3113,3 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             common_prefix_len=0,  # No cascade for encoder
             common_attn_metadata=common_metadata,
         )
-
-    def _create_mamba_state_tensors(
-        self,
-        raw_tensor: torch.Tensor,
-        shapes: tuple,
-        num_blocks: int,
-        num_element_per_page: int,
-        dtype: torch.dtype,
-    ) -> list[torch.Tensor]:
-        state_tensors = []
-        storage_offset = 0
-
-        for shape in shapes:
-            target_shape = (num_blocks, *shape)  # (50k, ... ,...)
-            stride = torch.empty(target_shape).stride()
-            target_stride = (num_element_per_page, *stride[1:])  # (20000000, ... ,...)
-            tensor = torch.as_strided(
-                raw_tensor.view(dtype),
-                size=target_shape,
-                stride=target_stride,
-                storage_offset=storage_offset,
-            )
-            storage_offset += stride[0]
-            state_tensors.append(tensor)
-
-        # self.validate_mamba_tensor_layout(raw_tensor, shapes, num_blocks, num_element_per_page, dtype)
-        self.test_tensor_memory_independence(state_tensors)
-
-        return state_tensors
-
-    def validate_mamba_tensor_layout(
-        self,
-        raw_tensor: torch.Tensor,
-        shapes: tuple,
-        num_blocks: int,
-        num_element_per_page: int,
-        dtype: torch.dtype,
-    ) -> bool:
-        """
-        Validate that Mamba state tensors don't overlap within each page.
-        """
-        storage_offset = 0
-        total_elements_per_page = 0
-
-        print(
-            f"Validating layout: num_blocks={num_blocks}, num_element_per_page={num_element_per_page}"
-        )
-
-        for i, shape in enumerate(shapes):
-            target_shape = (num_blocks, *shape)
-            stride = torch.empty(target_shape).stride()
-
-            # This is the actual memory footprint for one block of this tensor
-            elements_per_block = stride[0]  # Same as prod(shape)
-            total_elements_per_page += elements_per_block
-
-            print(f"Tensor {i}: shape={shape}, target_shape={target_shape}")
-            print(f"  stride={stride}, elements_per_block={elements_per_block}")
-            print(f"  storage_offset={storage_offset}")
-
-            # Check if this tensor fits within the page
-            if storage_offset + elements_per_block > num_element_per_page:
-                print(f"ERROR: Tensor {i} overflows page!")
-                print(
-                    f"  Needs: {storage_offset + elements_per_block}, Available: {num_element_per_page}"
-                )
-                return False
-
-            storage_offset += stride[0]
-
-        # Verify total doesn't exceed page size
-        if total_elements_per_page > num_element_per_page:
-            print(
-                f"ERROR: Total elements ({total_elements_per_page}) > page size ({num_element_per_page})"
-            )
-            return False
-
-        print(
-            f"✓ Layout valid: used {total_elements_per_page}/{num_element_per_page} elements per page"
-        )
-        return True
-
-    def test_tensor_memory_independence(
-        self, state_tensors: list[torch.Tensor]
-    ) -> bool:
-        """
-        Test that tensors don't share memory by checking data pointers within each block.
-        """
-        if len(state_tensors) < 2:
-            return True
-
-        # Test the first block of each tensor
-        for i in range(len(state_tensors)):
-            for j in range(i + 1, len(state_tensors)):
-                tensor_i_block0 = state_tensors[i][0]  # First block
-                tensor_j_block0 = state_tensors[j][0]  # First block
-
-                # Check if they share memory
-                ptr_i = tensor_i_block0.data_ptr()
-                ptr_j = tensor_j_block0.data_ptr()
-                size_i = tensor_i_block0.numel() * tensor_i_block0.element_size()
-                size_j = tensor_j_block0.numel() * tensor_j_block0.element_size()
-
-                # Check for overlap
-                if not (ptr_i + size_i <= ptr_j or ptr_j + size_j <= ptr_i):
-                    print(f"OVERLAP: Tensor {i} and {j} share memory in block 0")
-                    return False
-
-        return True

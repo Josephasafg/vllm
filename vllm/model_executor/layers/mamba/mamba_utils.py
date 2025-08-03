@@ -17,10 +17,11 @@ class MambaStateShapeCalculator:
         conv_state_shape = (divide(intermediate_size, tp_world_size), conv_kernel - 1)
 
         temporal_state_shape = (divide(intermediate_size, tp_world_size), state_size)
+
         if envs.VLLM_USE_V1:
             return (conv_state_shape[1], conv_state_shape[0]), temporal_state_shape
-        else:
-            return conv_state_shape, temporal_state_shape
+
+        return conv_state_shape, temporal_state_shape
 
     @classmethod
     def mamba2_state_shape(
