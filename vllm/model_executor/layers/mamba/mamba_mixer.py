@@ -211,48 +211,57 @@ class MambaMixer(MambaBase, CustomOp):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefills = attn_metadata.num_prefills  # number of sequences in prefill
-        num_decodes = attn_metadata.num_decode_tokens  # (often equal to number of decode requests)
+        num_decodes = attn_metadata.num_decode_tokens  # number of decode tokens (=requests in decode)
         has_prefill = num_prefill_tokens > 0
         has_decode = num_decode_tokens > 0
 
         # ------------- Split hidden states and indices for prefill vs decode -------------
-        if has_prefill and has_decode:
-            hidden_states_BC_p, hidden_states_BC_d = torch.split(hidden_states_BC,
+        if envs.VLLM_USE_V1:
+            # V1: decode tokens come first, then prefill tokens
+            hidden_states_BC_d, hidden_states_BC_p = torch.split(hidden_states_BC,
                                                                  [num_decode_tokens, num_prefill_tokens],
-                                                                 dim=-1) if envs.VLLM_USE_V1 else torch.split(
-                hidden_states_BC,
-                [num_prefill_tokens, num_decode_tokens],
-                dim=-1)
-            gate_p, gate_d = torch.split(gate,
+                                                                 dim=-1)
+            gate_d, gate_p = torch.split(gate,
                                          [num_decode_tokens, num_prefill_tokens],
-                                         dim=-1) if envs.VLLM_USE_V1 else torch.split(gate,
-                                                                                      [num_prefill_tokens,
-                                                                                       num_decode_tokens],
-                                                                                      dim=-1)
-            state_indices_tensor_p, state_indices_tensor_d = torch.split(state_indices_tensor,
+                                         dim=-1)
+            # For state indices, decode requests come first, then prefill requests
+            state_indices_tensor_d, state_indices_tensor_p = torch.split(state_indices_tensor,
                                                                          [num_decodes, num_prefills],
-                                                                         dim=0) if envs.VLLM_USE_V1 else torch.split(
-                state_indices_tensor,
-                [num_prefills, num_decodes],
-                dim=0)
-            context_lens_tensor_p, context_lens_tensor_d = None, None
-            if context_lens_tensor is not None:
-                context_lens_tensor_p, context_lens_tensor_d = torch.split(attn_metadata.context_lens_tensor,
-                                                                           [num_decodes, num_prefills],
-                                                                           dim=0) if envs.VLLM_USE_V1 else torch.split(
-                    attn_metadata.context_lens_tensor,
-                    [num_prefills, num_decodes],
-                    dim=0)
+                                                                         dim=0)
+            query_start_loc_p = (
+                query_start_loc[-num_prefills - 1:] -
+                num_decodes if has_prefill else None)
+
         else:
-            # If only one type of tokens present, no need to split: assign and treat one of them as empty
-            hidden_states_BC_p = hidden_states_BC if has_prefill else None
-            hidden_states_BC_d = hidden_states_BC if has_decode else None
-            gate_p = gate if has_prefill else None
-            gate_d = gate if has_decode else None
-            state_indices_tensor_p = state_indices_tensor if has_prefill else None
-            state_indices_tensor_d = state_indices_tensor if has_decode else None
-            context_lens_tensor_p = context_lens_tensor if has_prefill else None
-            context_lens_tensor_d = context_lens_tensor if has_decode else None
+            # V0: prefill tokens come first, then decode tokens
+            hidden_states_BC_p, hidden_states_BC_d = torch.split(hidden_states_BC,
+                                                                 [num_prefill_tokens, num_decode_tokens],
+                                                                 dim=-1)
+            gate_p, gate_d = torch.split(gate,
+                                         [num_prefill_tokens, num_decode_tokens],
+                                         dim=-1)
+            state_indices_tensor_p, state_indices_tensor_d = torch.split(state_indices_tensor,
+                                                                         [num_prefills, num_decodes],
+                                                                         dim=0)
+            query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills +
+                                                                1]
+                                 if has_prefill else None)
+
+        context_lens_tensor_p, context_lens_tensor_d = None, None
+        if context_lens_tensor is not None:
+            if envs.VLLM_USE_V1:
+                context_lens_tensor_d, context_lens_tensor_p = torch.split(context_lens_tensor,
+                                                                           [num_decodes, num_prefills],
+                                                                           dim=0)
+            else:
+                context_lens_tensor_p, context_lens_tensor_d = torch.split(context_lens_tensor,
+                                                                           [num_prefills, num_decodes],
+                                                                           dim=0)
+        # Split has_initial_states_p for mixed batches
+        has_initial_states_p_split = None
+        if has_initial_states_p is not None and envs.VLLM_USE_V1:
+            # In V1, decode requests come first, so prefill requests are at the end
+            has_initial_states_p_split = has_initial_states_p[-num_prefills:] if has_prefill else None
 
         if has_prefill:
             conv_input_p = hidden_states_BC_p  # [conv_channels, num_prefill_tokens]
@@ -262,21 +271,22 @@ class MambaMixer(MambaBase, CustomOp):
                 self.conv1d.bias,
                 activation=self.activation,
                 conv_states=conv_state,
-                has_initial_state=(context_lens_tensor_p > 0) if context_lens_tensor_p is not None else False,
+                has_initial_state=has_initial_states_p_split if envs.VLLM_USE_V1 else (
+                    (context_lens_tensor_p > 0) if context_lens_tensor_p is not None else False),
                 cache_indices=state_indices_tensor_p,
-                query_start_loc=query_start_loc[:num_prefills + 1] if query_start_loc is not None else None
+                query_start_loc=query_start_loc_p
             )
 
             # 3. State Space Model sequence transformation
             initial_states = None
-            if (has_initial_states_p is not None):
-                # making a copy of the states
-                if envs.VLLM_USE_V1:
-                    # Don't create full state tensor, just pass the boolean mask
-                    initial_states = has_initial_states_p[:]
-                else:
-                    initial_states = has_initial_states_p[:num_prefills]
+            if envs.VLLM_USE_V1:
+                if has_initial_states_p_split is not None:
+                    # Use the split version for mixed batches
+                    initial_states = has_initial_states_p_split[:]
 
+            else:
+                if has_initial_states_p is not None:
+                    initial_states = has_initial_states_p[:num_prefills]
         else:
             conv_out_p = None
 
@@ -291,7 +301,7 @@ class MambaMixer(MambaBase, CustomOp):
                 self.activation,
                 conv_state_indices=state_indices_tensor_d
             )
-            conv_out_d = conv_out_d.transpose(0, 1).contiguous()  # back to [conv_channels, num_decode_tokens]
+            conv_out_d = conv_out_d.transpose(0, 1)
 
         else:
             conv_out_d = None
@@ -342,9 +352,9 @@ class MambaMixer(MambaBase, CustomOp):
                 delta_softplus=True,
                 cache_indices=state_indices_tensor_p,
                 has_initial_state=initial_states,
-                query_start_loc=query_start_loc[:num_prefills + 1] if query_start_loc is not None else None
+                query_start_loc=query_start_loc_p
             )
-            outputs.append(scan_out_p)  # shape [output_channels, num_prefill_tokens]
+            # Store prefill output
 
         if has_decode:
             scan_outputs = torch.empty_like(hidden_states_BC_d.transpose(0, 1))
@@ -363,10 +373,20 @@ class MambaMixer(MambaBase, CustomOp):
                 out=scan_outputs
             )
             scan_outputs = scan_outputs.transpose(0, 1)
-            outputs.append(scan_outputs)  # shape [output_channels, num_decode_tokens]
+            # Store decode output
 
-        # Concatenate outputs from prefill and decode along token dimension
-        scan_outputs_combined = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        # Concatenate outputs in the correct order based on V1 vs V0
+        if has_prefill and has_decode:
+            if envs.VLLM_USE_V1:
+                # V1: decode comes first, then prefill
+                scan_outputs_combined = torch.cat([scan_outputs, scan_out_p], dim=-1)
+            else:
+                # V0: prefill comes first, then decode
+                scan_outputs_combined = torch.cat([scan_out_p, scan_outputs], dim=-1)
+        elif has_prefill:
+            scan_outputs_combined = scan_out_p
+        else:  # has_decode only
+            scan_outputs_combined = scan_outputs
 
         # 5. Final output projection (gated output to model dimension)
         if self.is_lora_enabled:
