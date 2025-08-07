@@ -154,19 +154,6 @@ class MambaMixer(MambaBase, CustomOp):
 
         self.prefix = prefix
 
-    def print_message(self, message):
-        if self.prefix == "backbone.layers.15.mixer":
-            print(message)
-
-    def _rms_norm(self, time_step: torch.Tensor, B: torch.Tensor, C: torch.Tensor) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Apply RMS normalization to time_step, B, and C if enabled."""
-        if self.use_rms_norm:
-            time_step = self.dt_layernorm(time_step.contiguous())
-            B = self.b_layernorm(B.contiguous())
-            C = self.c_layernorm(C.contiguous())
-        return time_step, B, C
-
     def _ssm_transform(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Applies x_proj, splits into time_step, B, C, applies RMS norm, and dt_proj.
@@ -178,7 +165,10 @@ class MambaMixer(MambaBase, CustomOp):
             ssm_params = self.x_proj(x)[0]
         time_step, B, C = torch.split(ssm_params, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
                                       dim=-1)
-        time_step, B, C = self._rms_norm(time_step, B, C)
+        if self.use_rms_norm:
+            time_step = self.dt_layernorm(time_step.contiguous())
+            B = self.b_layernorm(B.contiguous())
+            C = self.c_layernorm(C.contiguous())
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         return discrete_time_step, time_step, B, C
 
