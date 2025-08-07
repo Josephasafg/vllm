@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, List, NamedTuple
+from typing import Optional, NamedTuple
 
 import torch
 from torch import nn
@@ -210,7 +210,6 @@ class MambaMixer(MambaBase, CustomOp):
                 assert isinstance(mamba1_metadata, Mamba1AttentionMetadata)
                 query_start_loc = mamba1_metadata.query_start_loc
                 state_indices_tensor = mamba1_metadata.state_indices_tensor
-
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
@@ -446,9 +445,6 @@ def merge_outputs(
     V1: decode comes first, then prefill.
     V0: prefill comes first, then decode.
     """
-    if not (has_prefill or has_decode):
-        raise ValueError("At least one of has_prefill or has_decode must be True")
-
     if has_prefill and has_decode:
         if envs.VLLM_USE_V1:
             return torch.cat([scan_outputs_d, scan_out_p], dim=-1)
