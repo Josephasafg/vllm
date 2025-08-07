@@ -10,7 +10,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+    split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -72,9 +72,9 @@ class Mamba1AttentionMetadataBuilder(
 
         has_initial_states = None
 
-        # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
         if num_prefills > 0:
             has_initial_states = context_lens_tensor > 0
+
 
         return Mamba1AttentionMetadata(
             query_start_loc=query_start_loc,
