@@ -214,7 +214,6 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 has_initial_states_p = mamba1_metadata.has_initial_states
-                context_lens_tensor = mamba1_metadata.context_lens_tensor
         else:
             assert mamba_cache_params is not None
             conv_state = mamba_cache_params.conv_state
@@ -265,7 +264,7 @@ class MambaMixer(MambaBase, CustomOp):
         query_start_loc_p = pefill_decode_split.query_start_loc_p
         initial_states = pefill_decode_split.initial_states
 
-        scan_out_p, scan_outputs_d = None, None
+        ssm_outputs = []
 
         if has_prefill:
             # 2.a Prefill: Convolution sequence transformation
@@ -280,8 +279,6 @@ class MambaMixer(MambaBase, CustomOp):
                 cache_indices=state_indices_tensor_p,
                 query_start_loc=query_start_loc_p
             )
-            scan_out_p = conv_out_p
-
             # 3. State Space Model sequence transformation. Lora kernel requires contiguous tensor.
             discrete_time_step_p, time_step_p, B_p, C_p = self._ssm_transform(conv_out_p.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
@@ -302,6 +299,7 @@ class MambaMixer(MambaBase, CustomOp):
                 has_initial_state=initial_states,
                 query_start_loc=query_start_loc_p
             )
+            ssm_outputs.append(scan_out_p)
 
         if has_decode:
             # 2.b Decode: Convolution sequence transformation
@@ -315,7 +313,6 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_state_indices=state_indices_tensor_d
             )
             conv_out_d = conv_out_d.transpose(0, 1)
-            scan_outputs_d = conv_out_d
 
             # 3. State Space Model sequence transformation. Lora kernel requires contiguous tensor.
             discrete_time_step_d, time_step_d, B_d, C_d = self._ssm_transform(conv_out_d.transpose(-2, -1))
@@ -339,8 +336,12 @@ class MambaMixer(MambaBase, CustomOp):
             )
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
-        # Concatenate outputs in the correct order based on V1 vs V0
-        scan_outputs_combined = merge_outputs(scan_out_p, scan_outputs_d, has_prefill, has_decode)
+            if envs.VLLM_USE_V1:
+                ssm_outputs.insert(0, scan_outputs_d)
+            else:
+                ssm_outputs.append(scan_outputs_d)
+
+        scan_outputs_combined = ssm_outputs[0] if len(ssm_outputs) == 1 else torch.cat(ssm_outputs, dim=-1)
 
         # 5. Final output projection
         if self.is_lora_enabled:  # Lora kernel requires contiguous tensor.
@@ -405,7 +406,7 @@ def split_batch_to_prefill_and_decode(
                                                                      dim=0)
         query_start_loc_p = (query_start_loc[-num_prefills - 1:] - num_decodes if num_prefills > 0 else None)
         has_initial_states_p_split = has_initial_states_p[-num_prefills:] if (
-                    has_initial_states_p is not None and num_prefills > 0) else None
+                has_initial_states_p is not None and num_prefills > 0) else None
         initial_states = has_initial_states_p_split[:] if has_initial_states_p_split is not None else None
     else:
         # In v0, prefill tokens come first, then decode tokens.
@@ -420,7 +421,7 @@ def split_batch_to_prefill_and_decode(
                                                                      dim=0)
         query_start_loc_p = (query_start_loc[:num_prefills + 1] if num_prefills > 0 else None)
         initial_states = has_initial_states_p[:num_prefills] if (
-                    has_initial_states_p is not None and num_prefills > 0) else None
+                has_initial_states_p is not None and num_prefills > 0) else None
 
     return PrefillDecodeSplit(
         hidden_states_BC_p=hidden_states_BC_p,
@@ -432,25 +433,3 @@ def split_batch_to_prefill_and_decode(
         query_start_loc_p=query_start_loc_p,
         initial_states=initial_states,
     )
-
-
-def merge_outputs(
-        scan_out_p: Optional[torch.Tensor],
-        scan_outputs_d: Optional[torch.Tensor],
-        has_prefill: bool,
-        has_decode: bool
-) -> torch.Tensor:
-    """
-    Merge prefill and decode outputs in the correct order for v0/v1.
-    V1: decode comes first, then prefill.
-    V0: prefill comes first, then decode.
-    """
-    if has_prefill and has_decode:
-        if envs.VLLM_USE_V1:
-            return torch.cat([scan_outputs_d, scan_out_p], dim=-1)
-        else:
-            return torch.cat([scan_out_p, scan_outputs_d], dim=-1)
-    elif has_prefill:
-        return scan_out_p
-    else:  # has_decode only
-        return scan_outputs_d
