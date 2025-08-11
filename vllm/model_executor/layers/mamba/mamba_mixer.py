@@ -170,7 +170,7 @@ class MambaMixer(MambaBase, CustomOp):
             B = self.b_layernorm(B.contiguous())
             C = self.c_layernorm(C.contiguous())
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
-        return discrete_time_step, time_step, B, C
+        return discrete_time_step, B, C
 
     def forward_native(self,
                        hidden_states: torch.Tensor,
@@ -221,7 +221,7 @@ class MambaMixer(MambaBase, CustomOp):
             state_indices_tensor = mamba_cache_params.state_indices_tensor
             query_start_loc = attn_metadata.query_start_loc
             context_lens_tensor = attn_metadata.context_lens_tensor
-
+            has_initial_states_p = None
             if context_lens_tensor is not None:
                 has_initial_states_p = context_lens_tensor > 0
 
@@ -280,7 +280,7 @@ class MambaMixer(MambaBase, CustomOp):
                 query_start_loc=query_start_loc_p
             )
             # 3. State Space Model sequence transformation. Lora kernel requires contiguous tensor.
-            discrete_time_step_p, time_step_p, B_p, C_p = self._ssm_transform(conv_out_p.transpose(-2, -1))
+            discrete_time_step_p, B_p, C_p = self._ssm_transform(conv_out_p.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
 
             # 4.a Prefill: perform the recurrence y ← SSM(A, B, C, Δ)(x)
@@ -311,11 +311,10 @@ class MambaMixer(MambaBase, CustomOp):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor_d
-            )
-            conv_out_d = conv_out_d.transpose(0, 1)
+            ).transpose(0, 1)
 
             # 3. State Space Model sequence transformation. Lora kernel requires contiguous tensor.
-            discrete_time_step_d, time_step_d, B_d, C_d = self._ssm_transform(conv_out_d.transpose(-2, -1))
+            discrete_time_step_d, B_d, C_d = self._ssm_transform(conv_out_d.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
 
             # 4.b Decode: perform the recurrence y ← SSM(A, B, C, Δ)(x)
