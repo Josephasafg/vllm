@@ -101,6 +101,14 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
+    mamba_block_size: Optional[int] = None
+    """Size of a contiguous cache block in number of tokens for mamba cache."""
+    mamba_cache_strategy: str = "all"
+    """Logic for mamba cache:
+    * disabled - turn of prefix caching
+    * all - keep states for all prefixes
+    * last - keep the states of the last full blocks after each request
+    """
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)

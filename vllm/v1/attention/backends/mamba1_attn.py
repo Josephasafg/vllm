@@ -32,6 +32,8 @@ class Mamba1AttentionMetadata:
     num_decodes: int
     num_decode_tokens: int
     num_padded_decodes: int
+    cache_spec: Optional[object] = None
+    seq_lens: Optional[torch.Tensor] = None
 
 
 class Mamba1AttentionMetadataBuilder(
@@ -48,6 +50,8 @@ class Mamba1AttentionMetadataBuilder(
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
         context_lens_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
             query_start_loc.device)
+        
+
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -56,6 +60,28 @@ class Mamba1AttentionMetadataBuilder(
 
         has_initial_states = None
         padded_decodes = num_decodes
+
+        if self.kv_cache_spec.cache_strategy == "disabled":
+            # Always return just a single block per each request:
+            state_indices_tensor = common_attn_metadata.block_table_tensor[:,
+                                                                           0]
+        else:
+            # Return a tensor of shape (#requests, #blocks for longest request)
+            # filled in with cached and newly allocated blocks for each request
+            cache_block_size = self.kv_cache_spec.block_size
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            block_table_bounds_cpu = (seq_lens_cpu + cache_block_size -
+                                      1) // cache_block_size
+            max_num_blocks = block_table_bounds_cpu.max()
+            paged_kv_indices = common_attn_metadata.block_table_tensor[:, :
+                                                                       max_num_blocks]
+            if self.kv_cache_spec.cache_strategy == "last":
+                # TODO: The "last" strategy is not fully implemented yet
+                # In the "last" strategy, the allocator puts 2 block in front
+                # For easiness of handling, we move them to be two last in list
+                paged_kv_indices = torch.roll(paged_kv_indices,
+                                              max_num_blocks.item() - 2, -1)
+            state_indices_tensor = paged_kv_indices
 
         if num_prefills > 0:
             has_initial_states = context_lens_tensor > 0
@@ -78,4 +104,6 @@ class Mamba1AttentionMetadataBuilder(
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_padded_decodes=padded_decodes,
+            cache_spec=self.kv_cache_spec,
+            seq_lens=common_attn_metadata.seq_lens,
         )
