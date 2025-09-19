@@ -19,6 +19,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
@@ -261,12 +262,14 @@ class MambaMixer2(MambaBase, CustomOp):
                 ), "Tensor parallel world size must divide num heads."
 
         assert (n_groups % self.tp_size) == 0 or n_groups == 1, (
-            "If tensor parallel world size does not divide num_heads, "
+            "If tensor parallel world size does not divide num_groups, "
             "then num_groups must equal 1.")
 
-        assert (
-            self.tp_size == 1 or quant_config is None
-        ), "Tensor parallel currently not supported for quantized models."
+        assert (n_groups % self.tp_size == 0) or self.tp_size == 1 or \
+            quant_config is None, (
+            "Tensor parallel currently supported for quantized models only "
+            "if tensor parallel world size divides num groups."
+        )
 
         self.ssm_state_size = ssm_state_size
         self.conv_kernel_size = conv_kernel_size
@@ -285,98 +288,134 @@ class MambaMixer2(MambaBase, CustomOp):
                 n_groups, self.tp_size)
             self.n_groups = n_groups + groups
 
-        self.conv_dim = intermediate_size + 2 * self.n_groups * ssm_state_size
-        self.conv1d = ColumnParallelLinear(
-            input_size=conv_kernel_size,
-            output_size=self.conv_dim,
-            bias=use_conv_bias,
-            quant_config=None,
-        )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
-        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
+        self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
+        self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
-        self.in_proj = ColumnParallelLinear(
-            input_size=hidden_size,
-            output_size=intermediate_size + self.conv_dim + self.num_heads,
-            bias=use_bias,
-            quant_config=quant_config,
-        )
+        if n_groups % self.tp_size == 0:
+            self.conv1d = MergedColumnParallelLinear(
+                input_size=conv_kernel_size,
+                output_sizes=[
+                    intermediate_size,
+                    self.groups_ssm_state_size,
+                    self.groups_ssm_state_size,
+                ],
+                bias=use_conv_bias,
+                quant_config=None,
+                prefix=f"{prefix}.conv1d",
+            )
 
-        # - because in_proj is a concatenation of 3 weights, we
-        #   need to interleave them before sharding
-        # - use the custom weight loader mamba_v2_sharded_weight_loader
-        #   for conv1d.bias, covn1d.weight and in_proj.weight
-        # - need to set these settings, to assign the groups to the head shards
-        group_shard_settings = (
-            self.n_groups * self.ssm_state_size,  # expected model size
-            (self.n_groups - n_groups) *
-            self.ssm_state_size,  # extra dims assigned
-            n_groups == 1,  # if there was only one group
-        )
-        intermediate_settings = (intermediate_size, 0, False)
-        head_settings = (self.num_heads, 0, False)
+            self.in_proj = MergedColumnParallelLinear(
+                input_size=hidden_size,
+                output_sizes=[
+                    intermediate_size,
+                    intermediate_size,
+                    self.groups_ssm_state_size,
+                    self.groups_ssm_state_size,
+                    self.num_heads,
+                ],
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj",
+            )
+        else:
+            # This is the n_groups == 1 case,
+            # where we need to duplicate groups if TP>1.
 
-        # - the weight already has a "weight_loader" attribute
-        #   which set_weight_attrs will raise if we do not
-        #   delete before trying to override it
-        # - ditto for the otther two weights below
-        delattr(self.conv1d.bias, "weight_loader")
-        set_weight_attrs(
-            self.conv1d.bias,
-            {
-                "weight_loader":
-                mamba_v2_sharded_weight_loader(
-                    [
-                        intermediate_settings,
-                        group_shard_settings,
-                        group_shard_settings,
-                    ],
-                    self.tp_size,
-                    tp_rank,
-                )
-            },
-        )
+            self.conv1d = ColumnParallelLinear(
+                input_size=conv_kernel_size,
+                output_size=self.conv_dim,
+                bias=use_conv_bias,
+                quant_config=None,
+                prefix=f"{prefix}.conv1d",
+            )
 
-        delattr(self.conv1d.weight, "weight_loader")
-        set_weight_attrs(
-            self.conv1d.weight,
-            {
-                "weight_loader":
-                mamba_v2_sharded_weight_loader(
-                    [
-                        intermediate_settings,
-                        group_shard_settings,
-                        group_shard_settings,
-                    ],
-                    self.tp_size,
-                    tp_rank,
-                )
-            },
-        )
+            self.in_proj = ColumnParallelLinear(
+                input_size=hidden_size,
+                output_size=intermediate_size + self.conv_dim + self.num_heads,
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj",
+            )
 
-        if quant_config is None:
-            # - quant layers do not have a weight loader
-            delattr(self.in_proj.weight, "weight_loader")
+            # - because in_proj is a concatenation of 3 weights, we
+            #   need to interleave them before sharding
+            # - use the custom weight loader mamba_v2_sharded_weight_loader
+            #   for conv1d.bias, covn1d.weight and in_proj.weight
+            # - need to set these settings, to assign the groups
+            #   to the head shards
+            group_shard_settings = (
+                self.groups_ssm_state_size,  # expected model size
+                (self.n_groups - n_groups) *
+                self.ssm_state_size,  # extra dims assigned
+                n_groups == 1,  # if there was only one group
+            )
+            intermediate_settings = (intermediate_size, 0, False)
+            head_settings = (self.num_heads, 0, False)
+
+            # - the weight already has a "weight_loader" attribute
+            #   which set_weight_attrs will raise if we do not
+            #   delete before trying to override it
+            # - ditto for the other two weights below
+            delattr(self.conv1d.bias, "weight_loader")
             set_weight_attrs(
-                self.in_proj.weight,
+                self.conv1d.bias,
                 {
                     "weight_loader":
                     mamba_v2_sharded_weight_loader(
                         [
-                            intermediate_settings,  # for gate
                             intermediate_settings,
                             group_shard_settings,
                             group_shard_settings,
-                            head_settings,  # for dt
                         ],
                         self.tp_size,
                         tp_rank,
                     )
                 },
             )
+
+            delattr(self.conv1d.weight, "weight_loader")
+            set_weight_attrs(
+                self.conv1d.weight,
+                {
+                    "weight_loader":
+                    mamba_v2_sharded_weight_loader(
+                        [
+                            intermediate_settings,
+                            group_shard_settings,
+                            group_shard_settings,
+                        ],
+                        self.tp_size,
+                        tp_rank,
+                    )
+                },
+            )
+
+            if quant_config is None:
+                # - quant layers do not have a weight loader
+                delattr(self.in_proj.weight, "weight_loader")
+                set_weight_attrs(
+                    self.in_proj.weight,
+                    {
+                        "weight_loader":
+                        mamba_v2_sharded_weight_loader(
+                            [
+                                intermediate_settings,  # for gate
+                                intermediate_settings,
+                                group_shard_settings,
+                                group_shard_settings,
+                                head_settings,  # for dt
+                            ],
+                            self.tp_size,
+                            tp_rank,
+                        )
+                    },
+                )
+
+        # unsqueeze to fit conv1d weights shape into the linear weights shape.
+        # Can't do this in `weight_loader` since it already exists in
+        # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
+        # and `set_weight_attrs` doesn't allow to override it
+        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         # - these are TPed by heads to reduce the size of the
         #   temporal shape
@@ -402,6 +441,7 @@ class MambaMixer2(MambaBase, CustomOp):
             bias=use_bias,
             input_is_parallel=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
 
         self.norm = Mixer2RMSNormGated(intermediate_size,
@@ -467,6 +507,7 @@ class MambaMixer2(MambaBase, CustomOp):
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        cache_enabled = False
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
@@ -478,24 +519,24 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 state_indices_tensor = attn_metadata.state_indices_tensor
-                has_initial_states_p = attn_metadata.has_initial_states_p
-                prep_initial_states = attn_metadata.prep_initial_states
-                chunk_size = attn_metadata.chunk_size
-                seq_idx_p = attn_metadata.seq_idx_p
-                chunk_indices_p = attn_metadata.chunk_indices_p
-                chunk_offsets_p = attn_metadata.chunk_offsets_p
+                mamba_block_size = attn_metadata.cache_spec.block_size
+                cache_strategy = attn_metadata.cache_spec.cache_strategy
+                cache_enabled = (cache_strategy != 'disabled')
+                cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
+                last_chunk_p = attn_metadata.last_chunk_p
         else:
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
             state_indices_tensor = mamba_cache_params.state_indices_tensor
-            has_initial_states_p = mamba2_metadata.has_initial_states
+
+        # Common members between V1 metadata and V0 metadata
+        if mamba2_metadata is not None:
+            has_initial_states_p = mamba2_metadata.has_initial_states_p
             prep_initial_states = mamba2_metadata.prep_initial_states
             chunk_size = mamba2_metadata.chunk_size
-            seq_idx_p = mamba2_metadata.seq_idx
-            chunk_indices_p = mamba2_metadata.chunk_indices
-            chunk_offsets_p = mamba2_metadata.chunk_offsets
-
-        groups_time_state_size = self.n_groups * self.ssm_state_size
+            seq_idx_p = mamba2_metadata.seq_idx_p
+            chunk_indices_p = mamba2_metadata.chunk_indices_p
+            chunk_offsets_p = mamba2_metadata.chunk_offsets_p
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -521,8 +562,8 @@ class MambaMixer2(MambaBase, CustomOp):
             hidden_states_B_C,
             [
                 self.intermediate_size // self.tp_size,
-                groups_time_state_size // self.tp_size,
-                groups_time_state_size // self.tp_size,
+                self.groups_ssm_state_size // self.tp_size,
+                self.groups_ssm_state_size // self.tp_size,
             ],
             dim=-1,
         )
@@ -588,6 +629,28 @@ class MambaMixer2(MambaBase, CustomOp):
                                                                1]
                                  if has_prefill else None)
 
+        if envs.VLLM_USE_V1 and cache_enabled:
+            # Split decodes and prefills:
+            seq_lens_completed_d, seq_lens_completed_p = torch.split(
+                attn_metadata.seq_lens_completed, [num_decodes, num_prefills],
+                dim=0)
+            last_state_idx_d, last_state_idx_p = torch.split(
+                attn_metadata.last_computed_token_block_idx,
+                [num_decodes, num_prefills],
+                dim=0)
+            last_computed_offset_d, last_computed_offset_p = torch.split(
+                attn_metadata.last_computed_token_block_offset,
+                [num_decodes, num_prefills],
+                dim=0)
+            current_first_idx_d, current_first_idx_p = torch.split(
+                attn_metadata.current_first_token_block_idx,
+                [num_decodes, num_prefills],
+                dim=0)
+            current_last_idx_d, current_last_idx_p = torch.split(
+                attn_metadata.current_last_token_block_idx,
+                [num_decodes, num_prefills],
+                dim=0)
+
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
         preallocated_ssm_out = torch.empty(
@@ -621,6 +684,23 @@ class MambaMixer2(MambaBase, CustomOp):
             if mamba2_metadata.cu_seqlen is None:
                 mamba2_metadata = update_metadata(x, query_start_loc_p,
                                                   mamba2_metadata)
+
+            kernel_conv1d_indices = state_indices_tensor_p
+            if cache_enabled:
+                # Kernel expects to have the initial state here
+                # and overwrites it -> use final state location
+                if has_initial_states_p is not None \
+                    and has_initial_states_p.sum() > 0:
+                    conv_state_idx_input = state_indices_tensor_p.gather(
+                        1, last_state_idx_p.unsqueeze(1))
+                    conv_state_idx_output = state_indices_tensor_p.gather(
+                        1, current_last_idx_p.unsqueeze(1))
+                    conv_state[conv_state_idx_output[
+                        has_initial_states_p]] = conv_state[
+                            conv_state_idx_input[has_initial_states_p]]
+                kernel_conv1d_indices = state_indices_tensor_p.gather(
+                    1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 conv_weights,
@@ -628,29 +708,77 @@ class MambaMixer2(MambaBase, CustomOp):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
-                cache_indices=state_indices_tensor_p,
+                cache_indices=kernel_conv1d_indices,
                 metadata=mamba2_metadata,
                 query_start_loc=query_start_loc_p).transpose(
                     0, 1)[:num_prefill_tokens]
+
+            if cache_enabled:
+
+                def copy_to_conv_state(conv_state_block_idx, x, x_offset,
+                                       x_end, query_start_loc):
+                    conv_state[conv_state_block_idx, :, 0] = torch.transpose(
+                        x[:, query_start_loc + x_offset -
+                          3:x_end:mamba_block_size], 1, 0)
+                    conv_state[conv_state_block_idx, :, 1] = torch.transpose(
+                        x[:, query_start_loc + x_offset -
+                          2:x_end:mamba_block_size], 1, 0)
+                    conv_state[conv_state_block_idx, :, 2] = torch.transpose(
+                        x[:, query_start_loc + x_offset -
+                          1:x_end:mamba_block_size], 1, 0)
+
+                if cache_strategy == "all":
+                    n_blocks_to_fill = current_last_idx_p - current_first_idx_p
+                    # Iterate over sequences that require state storing:
+                    for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
+                        cache_blocks_to_fill = state_indices_tensor_p[
+                            seq_idx, current_first_idx_p[seq_idx]:
+                            current_first_idx_p[seq_idx] +
+                            n_blocks_to_fill[seq_idx]]
+                        from_where = x[:, query_start_loc_p[seq_idx]:
+                                       query_start_loc_p[seq_idx + 1]]
+                        # if last computation ended just before the end of block
+                        if last_computed_offset_p[seq_idx] + 3 >= \
+                            mamba_block_size:
+                            # the current x doesn't have the proper values
+                            # We need to get them from the past state.
+                            # Trick: The indices will go negative:
+                            # e.g. x[:,-3], x[:,-2], x[:,-1]
+                            # so pass x := concat(x, last_state)
+                            # to enable reading from the back
+                            # Note: Maybe always do this and remove "if"?
+                            from_where = torch.concat([
+                                from_where, conv_state[cache_blocks_to_fill[0]]
+                            ], 1)
+                        copy_to_conv_state(
+                            cache_blocks_to_fill, from_where, mamba_block_size,
+                            mamba_block_size * n_blocks_to_fill[seq_idx],
+                            mamba_block_size * current_first_idx_p[seq_idx] -
+                            seq_lens_completed_p[seq_idx])
 
             hidden_states_p, B_p, C_p = split_hidden_states_B_C_fn(
                 hidden_states_B_C_p)
 
             # 3. State Space Model sequence transformation
             initial_states = None
+
             if (has_initial_states_p is not None and prep_initial_states):
                 # making a copy of the states
                 if envs.VLLM_USE_V1:
+                    kernel_ssm_indices = state_indices_tensor_p
+                    if cache_enabled:
+                        kernel_ssm_indices = state_indices_tensor_p.gather(
+                            1, last_state_idx_p.unsqueeze(1)).squeeze(1)
+                    initial_states = torch.where(
+                        has_initial_states_p[:, None, None, None],
+                        ssm_state[kernel_ssm_indices], 0)
+                else:
                     initial_states = torch.where(
                         has_initial_states_p[:, None, None, None],
                         ssm_state[state_indices_tensor_p], 0)
-                else:
-                    initial_states = torch.where(
-                        has_initial_states_p[:num_prefills, None, None, None],
-                        ssm_state[state_indices_tensor_p], 0)
 
             # NOTE: final output is an in-place update of out tensor
-            varlen_state = mamba_chunk_scan_combined(
+            mamba_outputs = mamba_chunk_scan_combined(
                 hidden_states_p.view(1, num_prefill_tokens,
                                      self.num_heads // self.tp_size,
                                      self.head_dim),
@@ -668,7 +796,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 chunk_indices=chunk_indices_p,
                 chunk_offsets=chunk_offsets_p,
                 cu_seqlens=query_start_loc_p,
+                cu_chunk_seqlens=cu_chunk_seqlen_p,
+                last_chunk=last_chunk_p,
                 initial_states=initial_states,
+                return_intermediate_states=cache_enabled,
                 return_varlen_states=True,
                 return_final_states=False,
                 dt_softplus=True,
@@ -677,12 +808,69 @@ class MambaMixer2(MambaBase, CustomOp):
                                                 self.head_dim),
                 state_dtype=ssm_state.dtype)
 
-            # update ssm states
-            # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
-            ssm_state[state_indices_tensor_p] = varlen_state
+            if cache_enabled:
+                states, _ = mamba_outputs
+                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
+                # Save states for sequences with more than just the final state:
+                for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
+                    cache_blocks_to_fill = state_indices_tensor_p[
+                        seq_idx, current_first_idx_p[seq_idx]:
+                        current_first_idx_p[seq_idx] +
+                        n_blocks_to_fill[seq_idx]]
+                    # chunks = [0 1 2 3 4 5 6 ...]
+                    # First aligned chunk would typically be:
+                    #  mamba_block_size = 1024, chunk_size = 256
+                    #  1024 // 256 - 1 --> chunks[3]
+                    # But when last chunk wasn't block aligned:
+                    # - last_computed_token_block_offset[seq_idx] // chunk_size
+                    # e.g. 1000 // 256 -> 3 completed --> store chunk[0]
+                    # e.g. 513 // 256 -> 2 completed --> store chunk[1] (skip 1)
+                    # e.g. 256 // 256 -> 1 completed --> store chunk[2] (skip 2)
+                    # e.g. 10 // 256 -> 0 completed --> store chunk[3] (skip 3)
+                    chunk_stride = mamba_block_size // chunk_size
+                    last_computed_token_block_offset = \
+                        attn_metadata.last_computed_token_block_offset
+                    first_aligned_chunk = chunk_stride - 1 \
+                      - last_computed_token_block_offset[seq_idx] // chunk_size
+                    from_where = states[
+                        0, first_aligned_chunk:first_aligned_chunk +
+                        n_blocks_to_fill[seq_idx] * chunk_stride:chunk_stride]
+                    ssm_state[cache_blocks_to_fill] = from_where
+
+                #For all seqs, store the last state (Note: might be partial):
+                ssm_state[state_indices_tensor_p.gather(1,
+                          current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
+                    states[0, last_chunk_p]
+            else:
+                varlen_state = mamba_outputs
+                # update ssm states
+                # - varlen state is (num_prefills, nheads, headdim, dstate)
+                ssm_state[state_indices_tensor_p] = varlen_state
 
         # Process decode requests
         if has_decode:
+            if cache_enabled:
+                state_indices_tensor_d_input = \
+                    state_indices_tensor_d.gather(1,
+                        last_state_idx_d.unsqueeze(1)).squeeze(1)
+                state_indices_tensor_d_output = \
+                    state_indices_tensor_d.gather(1,
+                        current_last_idx_d.unsqueeze(1)).squeeze(1)
+                #Note:
+                # for decode always: current_first_idx_d == current_last_idx_d
+                # at block boundaries: current_first_idx_d > last_state_idx_d
+
+                # copy initial state to new location,
+                # as update kernel works in place
+                #if (current_last_idx_d > last_state_idx_d).any():
+                # (skip IF as it breaks CUDA graphs)
+                conv_state[state_indices_tensor_d_output] = conv_state[
+                    state_indices_tensor_d_input]
+            else:
+                # Without caching, read and write in-place to the same blocks:
+                state_indices_tensor_d_input = state_indices_tensor_d
+                state_indices_tensor_d_output = state_indices_tensor_d
+
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,
@@ -690,7 +878,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor_d)
+                conv_state_indices=state_indices_tensor_d_output)
 
             hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(
                 hidden_states_B_C_d)
@@ -722,7 +910,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=state_indices_tensor_d,
+                state_batch_indices=state_indices_tensor_d_input,
+                dst_state_batch_indices=state_indices_tensor_d_output,
                 out=preallocated_ssm_out_d.view(num_decodes, -1,
                                                 self.head_dim),
             )

@@ -359,7 +359,9 @@ def selective_scan_fn(u,
                       query_start_loc=None,
                       cache_indices=None,
                       has_initial_state=None,
-                      pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
+                      pad_slot_id=PAD_SLOT_ID,
+                      return_intermediate_states=False,
+                      boundary_positions=None) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
         applies changes in place.
@@ -416,12 +418,31 @@ def selective_scan_fn(u,
         C = C.unsqueeze(1)
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
+    
+    intermediate_states = None
+    if return_intermediate_states and boundary_positions is not None:
+        num_boundaries = boundary_positions.shape[0]
+        batch_size = u.shape[0] if u.dim() == 3 else 1
+        dim = u.shape[-2] if u.dim() == 3 else u.shape[0]
+        dstate = A.shape[-1]
+
+        intermediate_states = torch.empty(
+            (num_boundaries, dim, dstate),
+            dtype=ssm_states.dtype,
+            device=ssm_states.device,
+        )
 
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
                            query_start_loc, cache_indices, has_initial_state,
-                           ssm_states, pad_slot_id)
+                           ssm_states, pad_slot_id, boundary_positions,
+                           intermediate_states)
 
-    if z is None:
-        return delta  # output written inplace to delta
+    if return_intermediate_states:
+        return (z if z is not None else delta), intermediate_states
     else:
-        return z  # output written inplace to z
+        return z if z is not None else delta
+
+    # if z is None:
+    #     return delta  # output written inplace to delta
+    # else:
+    #     return z  # output written inplace to z
