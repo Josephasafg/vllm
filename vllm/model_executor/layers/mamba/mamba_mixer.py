@@ -379,10 +379,7 @@ class MambaMixer(MambaBase, CustomOp):
                 delta_softplus=True,
                 cache_indices=state_indices_tensor_p,
                 has_initial_state=has_initial_states_p,
-                query_start_loc=query_start_loc_p,
-                mamba_block_size=mamba_block_size if envs.VLLM_USE_V1 and cache_enabled else 2048,
-                cache_enabled=cache_enabled if envs.VLLM_USE_V1 else False)
-                
+                query_start_loc=query_start_loc_p)
             ssm_outputs.append(scan_out_p)
 
 

@@ -22,12 +22,11 @@ struct SSMParamsBase {
     bool is_variable_B;
     bool is_variable_C;
     int64_t pad_slot_id;
+    
+    // Add block size parameter for APC
+    int mamba_block_size;
 
     bool delta_softplus;
-
-    // Block-based caching parameters
-    int mamba_block_size;
-    bool cache_enabled;
 
     index_t A_d_stride;
     index_t A_dstate_stride;
