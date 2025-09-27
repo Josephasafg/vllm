@@ -323,7 +323,8 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& query_start_loc,
                         const std::optional<torch::Tensor>& cache_indices,
                         const std::optional<torch::Tensor>& has_initial_state,
-                        const torch::Tensor& ssm_states, int64_t pad_slot_id);
+                        const torch::Tensor& ssm_states, int64_t pad_slot_id,
+                        int64_t mamba_block_size, bool cache_enabled);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,

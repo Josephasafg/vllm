@@ -304,47 +304,44 @@ class MambaMixer(MambaBase, CustomOp):
         state_indices_tensor_d = prefill_decode_split.state_indices_tensor_d
         query_start_loc_p = prefill_decode_split.query_start_loc_p
         has_initial_states_p = prefill_decode_split.has_initial_states_p
-        seq_lens_pending = (torch.roll(query_start_loc, -1, -1) - query_start_loc)[:-1]
-        seq_lens_completed = (attn_metadata.seq_lens - seq_lens_pending)
 
-        if cache_enabled:
-            current_first_idx_d = attn_metadata.current_first_idx_d
-            current_first_idx_p = attn_metadata.current_first_idx_p
-            current_last_idx_d = attn_metadata.current_last_idx_d
-            current_last_idx_p = attn_metadata.current_last_idx_p
-            last_computed_offset_p = attn_metadata.last_computed_offset_p
-            last_computed_offset_d = attn_metadata.last_computed_offset_d
-            seq_lens_completed_p = attn_metadata.seq_lens_completed_p
-            seq_lens_completed_d = attn_metadata.seq_lens_completed_d
-            last_state_idx_p = attn_metadata.last_state_idx_p
-            last_state_idx_d = attn_metadata.last_state_idx_d
+        if envs.VLLM_USE_V1 and cache_enabled:
+            # Split decodes and prefills:
+            seq_lens_completed_d, seq_lens_completed_p = torch.split(
+                attn_metadata.seq_lens_completed, [num_decodes, num_prefills],
+                dim=0)
+            last_state_idx_d, last_state_idx_p = torch.split(
+                attn_metadata.last_computed_token_block_idx,
+                [num_decodes, num_prefills],
+                dim=0)
+            last_computed_offset_d, last_computed_offset_p = torch.split(
+                attn_metadata.last_computed_token_block_offset,
+                [num_decodes, num_prefills],
+                dim=0)
+            current_first_idx_d, current_first_idx_p = torch.split(
+                attn_metadata.current_first_token_block_idx,
+                [num_decodes, num_prefills],
+                dim=0)
+            current_last_idx_d, current_last_idx_p = torch.split(
+                attn_metadata.current_last_token_block_idx,
+                [num_decodes, num_prefills],
+                dim=0)
 
-            # print(f"current_first_idx_d: {current_first_idx_d}")
-            # print(f"current_first_idx_p: {current_first_idx_p}")
-            # print(f"current_last_idx_d: {current_last_idx_d}")
-            # print(f"current_last_idx_p: {current_last_idx_p}")
-            # print(f"last_computed_offset_p: {last_computed_offset_p}")
-            # print(f"last_computed_offset_d: {last_computed_offset_d}")
-            # print(f"seq_lens_completed_p: {seq_lens_completed_p}")
-            # print(f"seq_lens_completed_d: {seq_lens_completed_d}")
-            # print(f"last_state_idx_p: {last_state_idx_p}")
-            # print(f"last_state_idx_d: {last_state_idx_d}")
+        
         ssm_outputs = []
 
         if has_prefill:
-            kernel_conv1d_indices = state_indices_tensor_p
-            # Copy conv states from previous cached blocks for requests with initial states
             if cache_enabled:
-                # Copy conv states only if needed
-                if has_initial_states_p is not None and has_initial_states_p.sum() > 0:
-                    conv_state_idx_input = state_indices_tensor_p.gather(
-                        1, last_state_idx_p.unsqueeze(1))
-                    conv_state_idx_output = state_indices_tensor_p.gather(
-                        1, current_last_idx_p.unsqueeze(1))
-                    conv_state[conv_state_idx_output[has_initial_states_p]] = \
-                        conv_state[conv_state_idx_input[has_initial_states_p]]
-                kernel_conv1d_indices = state_indices_tensor_p.gather(
-                  1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
+                stride_state_indices = state_indices_tensor_p.shape[-1]
+            else:
+                current_first_idx_p = None
+                current_last_idx_p = None
+                seq_lens_completed_p = None
+                last_state_idx_p = None
+                n_blocks_to_fill = None
+                stride_state_indices = 1
+            
 
             # 2. Convolution sequence transformation
             conv_out_p = causal_conv1d_fn(
@@ -354,131 +351,38 @@ class MambaMixer(MambaBase, CustomOp):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
-                cache_indices=kernel_conv1d_indices,
+                cache_indices=state_indices_tensor_p,
+                n_blocks_to_fill=n_blocks_to_fill,
+                current_first_idx=current_first_idx_p,
+                current_last_idx=current_last_idx_p,
+                last_state_idx=last_state_idx_p,
+                seq_lens_completed=seq_lens_completed_p,
+                stride_cache_chunk=mamba_block_size // 1,
+                stride_state_indices=stride_state_indices,
                 query_start_loc=query_start_loc_p)
             
-            if cache_enabled:
-                def copy_to_conv_state(conv_state_block_idx, x, x_offset, x_end,
-                                         query_start_loc):
-                    kernel_width = self.conv_kernel_size
-                    for i in range(kernel_width - 1):
-                        offset = kernel_width - 1 - i
-                        conv_state[conv_state_block_idx, :, i] = torch.transpose(
-                            x[:, query_start_loc + x_offset - offset:
-                                                x_end:mamba_block_size], 1, 0)
-            
-            
-                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
-                # Iterate over sequences that require state storing:
-                for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
-                    cache_blocks_to_fill = state_indices_tensor_p[seq_idx,
-                        current_first_idx_p[seq_idx]:
-                        current_first_idx_p[seq_idx]+
-                            n_blocks_to_fill[seq_idx]]
-                    from_where = hidden_states_BC_p[:,query_start_loc_p[seq_idx]:
-                                        query_start_loc_p[seq_idx+1]]
-                    # if last computation ended just before the end of block
-                    if last_computed_offset_p[seq_idx] + 3 >= mamba_block_size:
-                        # the current x doesn't have the proper values
-                        # We need to get them from the past state.
-                        # Trick: The indices will go negative:
-                        # e.g. x[:,-3], x[:,-2], x[:,-1]
-                        # so pass x := concat(x, last_state)
-                        # to enable reading from the back
-                        # Note: Maybe always do this and remove "if"?
-                        from_where = torch.concat([from_where, 
-                            conv_state[cache_blocks_to_fill[0]]], 1)
-                    copy_to_conv_state(cache_blocks_to_fill, 
-                            from_where,
-                            mamba_block_size,
-                            mamba_block_size * n_blocks_to_fill[seq_idx],
-                            mamba_block_size * current_first_idx_p[seq_idx]
-                            - seq_lens_completed_p[seq_idx])
-
             # 3. State Space Model sequence transformations.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
                 conv_out_p.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
-
-
-            def store_ssm_states_at_block_boundaries(ssm_state, state_indices_tensor_p,
-                                         query_start_loc_p, mamba_block_size,
-                                         current_first_idx_p, current_last_idx_p,
-                                         seq_lens_completed_p, conv_out_p,
-                                         discrete_time_step_p, A, B_p, C_p, D,
-                                         gate_p, time_proj_bias):
-                """Store SSM states at block boundaries using the modified kernel."""
-
-                # Calculate boundary positions for all sequences
-                boundary_positions = []
-                cache_block_mapping = []
-
-                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
-                for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
-                    seq_start = query_start_loc_p[seq_idx]
-                    seq_completed = seq_lens_completed_p[seq_idx]
-                    cache_blocks = state_indices_tensor_p[
-                        seq_idx, current_first_idx_p[seq_idx]:
-                        current_first_idx_p[seq_idx] + n_blocks_to_fill[seq_idx]]
-
-                    for block_idx, cache_block_id in enumerate(cache_blocks):
-                        boundary_pos = seq_start + (block_idx + 1) * mamba_block_size - seq_completed - 1
-                        boundary_positions.append(boundary_pos)
-                        cache_block_mapping.append(cache_block_id)
-
-                if not boundary_positions:
-                    return
-
-                boundary_positions = torch.tensor(boundary_positions, device=conv_out_p.device, dtype=torch.int64)
-
-                # Call the modified selective_scan_fn with intermediate state capture
-                scan_out_p, intermediate_states = selective_scan_fn(
-                    conv_out_p,
-                    ssm_state,
-                    discrete_time_step_p,
-                    A,
-                    B_p.transpose(-2, -1),
-                    C_p.transpose(-2, -1),
-                    D.float(),
-                    gate_p,
-                    time_proj_bias, 
-                    delta_softplus=True,
-                    cache_indices=state_indices_tensor_p.gather(1, current_last_idx_p.unsqueeze(1)).squeeze(1),
-                    has_initial_state=has_initial_states_p, 
-                    query_start_loc=query_start_loc_p,
-                    return_intermediate_states=True,
-                    boundary_positions=boundary_positions)
-
-                # Store the captured intermediate states in the cache
-                for i, cache_block_id in enumerate(cache_block_mapping):
-                    ssm_state[cache_block_id] = intermediate_states[i]
-
-                return scan_out_p
-
-            if cache_enabled:
-                # Note: ssm state updates happen inside kernels via cache_indices
-                kernel_ssm_indices = state_indices_tensor_p.gather(1, current_last_idx_p.unsqueeze(1)).squeeze(1)
-
-                scan_out_p, intermediate_states = store_ssm_states_at_block_boundaries(
-                    ssm_state, state_indices_tensor_p, query_start_loc_p, mamba_block_size,
-                    current_first_idx_p, current_last_idx_p, seq_lens_completed_p, conv_out_p,
-                    discrete_time_step_p, self.A, B_p, C_p, self.D, gate_p, time_proj_bias)
-            else:
-                scan_out_p = selective_scan_fn(
-                    conv_out_p,
-                    ssm_state,
-                    discrete_time_step_p,
-                    self.A,
-                    B_p.transpose(-2, -1),
-                    C_p.transpose(-2, -1),
-                    self.D.float(),
-                    gate_p,
-                    time_proj_bias,
-                    delta_softplus=True,
-                    cache_indices=kernel_ssm_indices,
-                    has_initial_state=has_initial_states_p,
-                    query_start_loc=query_start_loc_p)
-                    
+            
+            scan_out_p = selective_scan_fn(
+                conv_out_p,
+                ssm_state,
+                discrete_time_step_p,
+                self.A,
+                B_p.transpose(-2, -1),
+                C_p.transpose(-2, -1),
+                self.D.float(),
+                gate_p,
+                time_proj_bias,
+                delta_softplus=True,
+                cache_indices=state_indices_tensor_p,
+                has_initial_state=has_initial_states_p,
+                query_start_loc=query_start_loc_p,
+                mamba_block_size=mamba_block_size if envs.VLLM_USE_V1 and cache_enabled else 2048,
+                cache_enabled=cache_enabled if envs.VLLM_USE_V1 else False)
+                
             ssm_outputs.append(scan_out_p)
 
 
@@ -486,22 +390,20 @@ class MambaMixer(MambaBase, CustomOp):
 
             if cache_enabled:
                 state_indices_tensor_d_input = \
-                    state_indices_tensor_d.gather(1, 
+                    state_indices_tensor_d.gather(1,
                         last_state_idx_d.unsqueeze(1)).squeeze(1)
                 state_indices_tensor_d_output = \
-                    state_indices_tensor_d.gather(1, 
+                    state_indices_tensor_d.gather(1,
                         current_last_idx_d.unsqueeze(1)).squeeze(1)
-                
-                # copy initial state to new location,
-                # as update kernel works in place
-                conv_state[state_indices_tensor_d_output] = conv_state[state_indices_tensor_d_input]
+                #Note:
+                # for decode always: current_first_idx_d == current_last_idx_d
+                # at block boundaries: current_first_idx_d > last_state_idx_d
             else:
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
-            # state_indices_tensor_d_input, state_indices_tensor_d_output = _handle_decode_state_indices(
-            #     cache_enabled, state_indices_tensor_d, num_decodes, 
-            #     attn_metadata, mamba_block_size, conv_state, ssm_state)
+                current_last_idx_d = None
+                last_state_idx_d = None
                 
             # 2. Convolution sequence transformation
             conv_out_d = causal_conv1d_update(
@@ -510,7 +412,9 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor_d_output).transpose(0, 1)
+                conv_state_indices=state_indices_tensor_d_output,
+                current_last_idx=current_last_idx_d,
+                last_state_idx=last_state_idx_d).transpose(0, 1)
 
             # 3. State Space Model sequence transformation.
             discrete_time_step_d, B_d, C_d = self._ssm_transform(

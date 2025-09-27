@@ -13,6 +13,8 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder)
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               split_decodes_and_prefills)
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.config import VllmConfig
 
 
 class Mamba1AttentionBackend(AttentionBackend):
@@ -35,19 +37,53 @@ class Mamba1AttentionMetadata:
     num_padded_decodes: int
     cache_spec: Optional[object] = None
     seq_lens: Optional[torch.Tensor] = None
-    current_first_idx_d: Optional[torch.Tensor] = None
-    current_first_idx_p: Optional[torch.Tensor] = None
-    current_last_idx_d: Optional[torch.Tensor] = None
-    current_last_idx_p: Optional[torch.Tensor] = None
-    last_computed_offset_d: Optional[torch.Tensor] = None
-    last_computed_offset_p: Optional[torch.Tensor] = None
-    seq_lens_completed_d: Optional[torch.Tensor] = None
-    seq_lens_completed_p: Optional[torch.Tensor] = None
-    last_state_idx_d: Optional[torch.Tensor] = None
-    last_state_idx_p: Optional[torch.Tensor] = None
+    current_last_token_block_idx: torch.Tensor
+    current_first_token_block_idx: torch.Tensor
+    last_computed_token_block_idx: torch.Tensor
+    seq_lens_completed: torch.Tensor
+    last_computed_token_block_offset: torch.Tensor
+
 
 class Mamba1AttentionMetadataBuilder(
         BaseMambaAttentionMetadataBuilder[Mamba1AttentionMetadata]):
+    
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        assert isinstance(kv_cache_spec, MambaSpec)
+        if kv_cache_spec.cache_strategy == "all":
+            self.state_indices_tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,
+                 cdiv(vllm_config.model_config.max_model_len,
+                      kv_cache_spec.block_size)),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.current_last_token_block_idx = torch.empty(
+                (self.decode_cudagraph_max_bs, ),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.current_first_token_block_idx = torch.empty(
+                (self.decode_cudagraph_max_bs, ),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.last_computed_token_block_idx = torch.empty(
+                (self.decode_cudagraph_max_bs, ),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.seq_lens_completed = torch.empty(
+                (self.decode_cudagraph_max_bs, ),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.last_computed_token_block_offset = torch.empty(
+                (self.decode_cudagraph_max_bs, ),
+                dtype=torch.int32,
+                device=device,
+            )
     
     def build(
         self,
@@ -77,52 +113,41 @@ class Mamba1AttentionMetadataBuilder(
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:,
                                                                            0]
-            current_first_idx_d = None
-            current_first_idx_p = None
-            current_last_idx_d = None
-            current_last_idx_p = None
-            last_computed_offset_d = None
-            last_computed_offset_p = None
-            seq_lens_completed_d = None
-            seq_lens_completed_p = None
-            last_state_idx_d = None
-            last_state_idx_p = None
+            current_last_token_block_idx = None
+            current_first_token_block_idx = None
+            last_computed_token_block_idx = None
+            last_computed_token_block_offset = None
+            seq_lens_completed = None
         else:
             # Return a tensor of shape (#requests, #blocks for longest request)
             # filled in with cached and newly allocated blocks for each request
             state_indices_tensor = common_attn_metadata.block_table_tensor
-        
+            mamba_block_size = self.kv_cache_spec.block_size
             seq_lens_pending = (
-                torch.roll(query_start_loc, -1, -1) -
-                query_start_loc)[:-1]
-            seq_lens_completed = (seq_lens - seq_lens_pending)
-            last_computed_token_block_offset = seq_lens_completed % mamba_block_size
-            # e.g. 16 blocks computed; 0th based indexing -> state[15]
-            last_computed_token_block_idx = \
-                seq_lens_completed // mamba_block_size - 1
-            # -1 in case it's non-computed and causes later issues with indexing
-            last_computed_token_block_idx = last_computed_token_block_idx.clamp(
-                min=0)
-            current_first_token_block_idx = cdiv(seq_lens_completed + 1,
-                                                 mamba_block_size) - 1
+                torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
+                common_attn_metadata.query_start_loc)[:-1]
+            seq_lens_completed = common_attn_metadata.seq_lens - \
+                                 seq_lens_pending
+            last_computed_token_block_offset = \
+                seq_lens_completed % mamba_block_size
+            
+            # Indices: last_computed <= current_first <= current_last
+            # Cases:
+            #  last_computed == current_first  if last state was partially
+            #                                  computed and needs to be updated
+            #  current_first == current_last   if no block crossing occurs, and
+            #                                  only one state will be stored
+            # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
             current_last_token_block_idx = cdiv(
                 seq_lens_completed + seq_lens_pending, mamba_block_size) - 1
-
-            seq_lens_completed_d, seq_lens_completed_p = torch.split(
-                seq_lens_completed, [num_decodes, num_prefills],
-                dim=0)
-            last_state_idx_d, last_state_idx_p = torch.split(
-                last_computed_token_block_idx, [num_decodes, num_prefills],
-                dim=0)
-            last_computed_offset_d, last_computed_offset_p = torch.split(
-                last_computed_token_block_offset, [num_decodes, num_prefills],
-                dim=0)
-            current_first_idx_d, current_first_idx_p = torch.split(
-                current_first_token_block_idx, [num_decodes, num_prefills],
-                dim=0)
-            current_last_idx_d, current_last_idx_p = torch.split(
-                current_last_token_block_idx, [num_decodes, num_prefills],
-                dim=0)
+            current_first_token_block_idx = cdiv(seq_lens_completed + 1,
+                                                 mamba_block_size) - 1
+            last_computed_token_block_idx = cdiv(seq_lens_completed,
+                                                 mamba_block_size) - 1
+            # -1 in case it's non-computed and causes later issues with indexing
+            last_computed_token_block_idx = \
+                last_computed_token_block_idx.clamp(min=0)
+        
 
         if num_prefills > 0:
             has_initial_states = context_lens_tensor > 0
@@ -134,6 +159,36 @@ class Mamba1AttentionMetadataBuilder(
                 state_indices_for_decode, non_blocking=True)
             state_indices_tensor = self.state_indices_tensor[:padded_decodes]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+
+            if self.kv_cache_spec.cache_strategy != 'disabled':
+                self.current_last_token_block_idx[:num_decodes].copy_(
+                    current_last_token_block_idx, non_blocking=True)
+                current_last_token_block_idx = \
+                    self.current_last_token_block_idx[:padded_decodes]
+                current_last_token_block_idx[num_decodes:] = 0
+
+                self.current_first_token_block_idx[:num_decodes].copy_(
+                    current_first_token_block_idx, non_blocking=True)
+                current_first_token_block_idx = \
+                    self.current_first_token_block_idx[:padded_decodes]
+                current_first_token_block_idx[num_decodes:] = 0
+
+                self.last_computed_token_block_idx[:num_decodes].copy_(
+                    last_computed_token_block_idx, non_blocking=True)
+                last_computed_token_block_idx = \
+                    self.last_computed_token_block_idx[:padded_decodes]
+                last_computed_token_block_idx[num_decodes:] = 0
+
+                self.seq_lens_completed[:num_decodes].copy_(seq_lens_completed,
+                                                            non_blocking=True)
+                seq_lens_completed = self.seq_lens_completed[:padded_decodes]
+                seq_lens_completed[num_decodes:] = 0
+
+                self.last_computed_token_block_offset[:num_decodes].copy_(
+                    last_computed_token_block_offset, non_blocking=True)
+                last_computed_token_block_offset = \
+                    self.last_computed_token_block_offset[:padded_decodes]
+                last_computed_token_block_offset[num_decodes:] = 0
 
         return Mamba1AttentionMetadata(
             query_start_loc=query_start_loc,
@@ -147,14 +202,9 @@ class Mamba1AttentionMetadataBuilder(
             num_padded_decodes=padded_decodes,
             cache_spec=self.kv_cache_spec,
             seq_lens=seq_lens,
-            current_first_idx_d=current_first_idx_d,
-            current_first_idx_p=current_first_idx_p,
-            current_last_idx_d=current_last_idx_d,
-            current_last_idx_p=current_last_idx_p,
-            last_computed_offset_d=last_computed_offset_d,
-            last_computed_offset_p=last_computed_offset_p,
-            seq_lens_completed_d=seq_lens_completed_d,
-            seq_lens_completed_p=seq_lens_completed_p,
-            last_state_idx_d=last_state_idx_d,
-            last_state_idx_p=last_state_idx_p,
+            current_last_token_block_idx=current_last_token_block_idx,
+            current_first_token_block_idx=current_first_token_block_idx,
+            last_computed_token_block_idx=last_computed_token_block_idx,
+            seq_lens_completed=seq_lens_completed,
+            last_computed_token_block_offset=last_computed_token_block_offset,
         )

@@ -607,7 +607,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
       "Tensor! ssm_states,"
-      "int pad_slot_id) -> ()");
+      "int pad_slot_id,"
+      "int mamba_block_size,"
+      "bool cache_enabled) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
 #ifndef USE_ROCM

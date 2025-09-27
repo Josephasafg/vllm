@@ -25,6 +25,10 @@ struct SSMParamsBase {
 
     bool delta_softplus;
 
+    // Block-based caching parameters
+    int mamba_block_size;
+    bool cache_enabled;
+
     index_t A_d_stride;
     index_t A_dstate_stride;
     index_t B_batch_stride;

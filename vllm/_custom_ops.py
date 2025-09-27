@@ -1435,11 +1435,13 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                        query_start_loc: Optional[torch.Tensor],
                        cache_indices: Optional[torch.Tensor],
                        has_initial_state: Optional[torch.Tensor],
-                       ssm_states: torch.Tensor, pad_slot_id: int):
+                       ssm_states: torch.Tensor, pad_slot_id: int,
+                       mamba_block_size: int = 128, cache_enabled: bool = False):
     torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_, delta_bias_,
                                     delta_softplus, query_start_loc,
                                     cache_indices, has_initial_state,
-                                    ssm_states, pad_slot_id)
+                                    ssm_states, pad_slot_id, mamba_block_size,
+                                    cache_enabled)
 
 
 # ROCm skinny gemms
