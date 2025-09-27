@@ -88,10 +88,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     using input_t = typename Ktraits::input_t;
     using weight_t = typename Ktraits::weight_t;
     using scan_t = typename Ktraits::scan_t;
-    const bool kCaptureIntermediates = params.return_intermediate_states;
-    int64_t *boundary_positions = reinterpret_cast<int64_t*>(params.boundary_positions_ptr);
-    typename Ktraits::state_t *intermediate_states =
-        reinterpret_cast<typename Ktraits::state_t*>(params.intermediate_states_ptr);
 
     // Shared memory.
     extern __shared__ char smem_[];
@@ -265,29 +261,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
                 if (threadIdx.x == 0) {
                     smem_running_prefix[state_idx] = prefix_op.running_prefix;
-              
-                    // Store final state for the last chunk (existing behavior)
                     if (chunk == n_chunks - 1) {
                         ssm_states[state_idx * params.ssm_states_dstate_stride] = typename Ktraits::state_t(prefix_op.running_prefix.y);
-                    }
-              
-                    // NEW: Capture intermediate states at boundary positions
-                    if (kCaptureIntermediates && boundary_positions != nullptr) {
-                        // Current position is the end of this chunk
-                        int current_pos = sequence_start_index + min((chunk + 1) * kChunkSize, seqlen) - 1;
-              
-                        // Linear search through boundary positions (could be optimized to binary search)
-                        for (int b = 0; b < params.num_boundaries; ++b) {
-                            if (boundary_positions[b] == current_pos) {
-                                auto boundary_state_ptr = intermediate_states +
-                                    b * params.intermediate_states_boundary_stride +
-                                    dim_id * params.intermediate_states_dim_stride +
-                                    state_idx * params.intermediate_states_dstate_stride;
-              
-                                *boundary_state_ptr = typename Ktraits::state_t(prefix_op.running_prefix.y);
-                                break;
-                            }
-                        }
                     }
                 }
                 #pragma unroll
@@ -468,9 +443,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const std::optional<at::Tensor>& cache_indices,
                         const std::optional<at::Tensor>& has_initial_state,
                         bool varlen,
-                        int64_t pad_slot_id,
-                        const std::optional<at::Tensor>& boundary_positions = std::nullopt,
-                        const std::optional<at::Tensor>& intermediate_states = std::nullopt) {
+                        int64_t pad_slot_id) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -567,21 +540,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
         params.ssm_states_dim_stride = ssm_states.stride(1);  
         params.ssm_states_dstate_stride = ssm_states.stride(2);
     }
-
-    params.return_intermediate_states = intermediate_states.has_value();
-    if (params.return_intermediate_states) {
-        params.intermediate_states_ptr = intermediate_states.value().data_ptr();
-        params.intermediate_states_boundary_stride = intermediate_states.value().stride(0);
-        params.intermediate_states_dim_stride = intermediate_states.value().stride(1);
-        params.intermediate_states_dstate_stride = intermediate_states.value().stride(2);
-
-        params.boundary_positions_ptr = boundary_positions.value().data_ptr<int64_t>();
-        params.num_boundaries = boundary_positions.value().size(0);
-    } else {
-        params.intermediate_states_ptr = nullptr;
-        params.boundary_positions_ptr = nullptr;
-        params.num_boundaries = 0;
-    }
 }
 
 void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
@@ -596,9 +554,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const torch::Tensor &ssm_states,
                   // used to identify padding entries if cache_indices provided
                   // in case of padding, the kernel will return early
-                  int64_t pad_slot_id,
-                  const std::optional<torch::Tensor> &boundary_positions,
-                  const std::optional<torch::Tensor> &intermediate_states) {
+                  int64_t pad_slot_id) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -730,9 +686,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        cache_indices,
                        has_initial_state,
                        varlen,
-                       pad_slot_id,
-                       boundary_positions,
-                       intermediate_states,
+                       pad_slot_id
                        );
 
     

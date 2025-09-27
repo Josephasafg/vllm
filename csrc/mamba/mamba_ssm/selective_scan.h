@@ -66,16 +66,6 @@ struct SSMParamsBase {
     void *__restrict__ cache_indices_ptr;
     void *__restrict__ has_initial_state_ptr;
 
-    // NEW: Block-based caching support
-    bool return_intermediate_states;
-    int64_t *boundary_positions_ptr;  // positions where we want to capture states
-    int num_boundaries;
-    void *__restrict__ intermediate_states_ptr;  // output buffer for intermediate states
-    // NEW: Strides for intermediate states
-    index_t intermediate_states_boundary_stride;
-    index_t intermediate_states_dim_stride;
-    index_t intermediate_states_dstate_stride;
-
 };
 
 
