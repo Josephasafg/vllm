@@ -111,13 +111,14 @@ def _selective_scan_update_kernel(
         dst_state_batch_indices_ptr += pid_b
         dst_state_batch_idx = tl.load(dst_state_batch_indices_ptr).to(tl.int64)
         dst_state_ptr = state_ptr + (dst_state_batch_idx * stride_state_batch +
-                                    pid_h * stride_state_head)
+                                     pid_h * stride_state_head)
         state_batch_indices_ptr += pid_b
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += (state_batch_idx * stride_state_batch +
                       pid_h * stride_state_head)
     else:
-        dst_state_ptr = state_ptr + pid_b * stride_state_batch + pid_h * stride_state_head
+        dst_state_ptr = state_ptr + pid_b * stride_state_batch + \
+            pid_h * stride_state_head
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
 
     x_ptr += pid_b * stride_x_batch + pid_h * stride_x_head
@@ -193,7 +194,6 @@ def _selective_scan_update_kernel(
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
         mask &= (state_batch_idx != pad_slot_id)
-    tl.store(state_ptrs, state, mask=mask)
     tl.store(dst_state_ptrs, state, mask=mask)
     out = tl.sum(state * C[None, :], axis=1)
     if HAS_D:
@@ -359,9 +359,7 @@ def selective_scan_fn(u,
                       query_start_loc=None,
                       cache_indices=None,
                       has_initial_state=None,
-                      pad_slot_id=PAD_SLOT_ID,
-                      return_intermediate_states=False,
-                      boundary_positions=None) -> torch.Tensor:
+                      pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
         applies changes in place.
@@ -418,31 +416,12 @@ def selective_scan_fn(u,
         C = C.unsqueeze(1)
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
-    
-    intermediate_states = None
-    if return_intermediate_states and boundary_positions is not None:
-        num_boundaries = boundary_positions.shape[0]
-        batch_size = u.shape[0] if u.dim() == 3 else 1
-        dim = u.shape[-2] if u.dim() == 3 else u.shape[0]
-        dstate = A.shape[-1]
-
-        intermediate_states = torch.empty(
-            (num_boundaries, dim, dstate),
-            dtype=ssm_states.dtype,
-            device=ssm_states.device,
-        )
 
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
                            query_start_loc, cache_indices, has_initial_state,
-                           ssm_states, pad_slot_id, boundary_positions,
-                           intermediate_states)
+                           ssm_states, pad_slot_id)
 
-    if return_intermediate_states:
-        return (z if z is not None else delta), intermediate_states
+    if z is None:
+        return delta  # output written inplace to delta
     else:
-        return z if z is not None else delta
-
-    # if z is None:
-    #     return delta  # output written inplace to delta
-    # else:
-    #     return z  # output written inplace to z
+        return z  # output written inplace to z
