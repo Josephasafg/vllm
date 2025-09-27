@@ -35,13 +35,14 @@ class Mamba1AttentionMetadata:
     num_decodes: int
     num_decode_tokens: int
     num_padded_decodes: int
+    
+    current_last_token_block_idx: torch.Tensor | None
+    current_first_token_block_idx: torch.Tensor | None
+    last_computed_token_block_idx: torch.Tensor | None
+    seq_lens_completed: torch.Tensor | None
+    last_computed_token_block_offset: torch.Tensor | None
     cache_spec: Optional[object] = None
     seq_lens: Optional[torch.Tensor] = None
-    current_last_token_block_idx: torch.Tensor
-    current_first_token_block_idx: torch.Tensor
-    last_computed_token_block_idx: torch.Tensor
-    seq_lens_completed: torch.Tensor
-    last_computed_token_block_offset: torch.Tensor
 
 
 class Mamba1AttentionMetadataBuilder(
