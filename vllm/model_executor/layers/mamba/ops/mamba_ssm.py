@@ -359,7 +359,10 @@ def selective_scan_fn(u,
                       query_start_loc=None,
                       cache_indices=None,
                       has_initial_state=None,
-                      pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
+                      pad_slot_id=PAD_SLOT_ID,
+                      mamba_block_size=0,
+                      enable_apc=False,
+                      intermediate_states=None) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
         applies changes in place.
@@ -419,7 +422,8 @@ def selective_scan_fn(u,
 
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
                            query_start_loc, cache_indices, has_initial_state,
-                           ssm_states, pad_slot_id)
+                           ssm_states, pad_slot_id, mamba_block_size, enable_apc, 
+                           intermediate_states)
 
     if z is None:
         return delta  # output written inplace to delta

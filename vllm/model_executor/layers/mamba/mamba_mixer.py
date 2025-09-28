@@ -365,8 +365,11 @@ class MambaMixer(MambaBase, CustomOp):
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
                 conv_out_p.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
-            cached_state_indices_tensor_p = state_indices_tensor_p.gather(
-                1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+            
+            # APC parameters
+            apc_mamba_block_size = mamba_block_size if cache_enabled else 0
+            apc_enable = cache_enabled
+            apc_intermediate_states = None  # TODO: Create intermediate states tensor if needed
             
             scan_out_p = selective_scan_fn(
                 conv_out_p,
@@ -379,9 +382,12 @@ class MambaMixer(MambaBase, CustomOp):
                 gate_p,
                 time_proj_bias,
                 delta_softplus=True,
-                cache_indices=cached_state_indices_tensor_p,
+                cache_indices=state_indices_tensor_p,
                 has_initial_state=has_initial_states_p,
-                query_start_loc=query_start_loc_p)
+                query_start_loc=query_start_loc_p,
+                mamba_block_size=apc_mamba_block_size,
+                enable_apc=apc_enable,
+                intermediate_states=apc_intermediate_states)
             ssm_outputs.append(scan_out_p)
 
 
