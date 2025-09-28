@@ -162,8 +162,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
 
     // Get block_states pointer if cache is enabled
-    float *block_states = params.cache_enabled && params.block_states_ptr != nullptr ?
-                          reinterpret_cast<float *>(params.block_states_ptr) : nullptr;
+    // Use the same type as state_t to match intermediate_states dtype
+    typename Ktraits::state_t *block_states = params.cache_enabled && params.block_states_ptr != nullptr ?
+                          reinterpret_cast<typename Ktraits::state_t *>(params.block_states_ptr) : nullptr;
 
     // Track global position for block caching
     int global_pos = 0;
@@ -297,7 +298,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                       (global_block_idx - 1) * params.dim * params.dstate +
                                       dim_id * params.dstate +
                                       state_idx;
-                    running_prefix = make_float2(1.0, block_states[state_offset]);
+                    running_prefix = make_float2(1.0, float(block_states[state_offset]));
                 } else if (chunk > 0 || block_in_chunk > 0) {
                     running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
                 } else {
@@ -320,7 +321,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                          global_block_idx * params.dim * params.dstate +
                                          dim_id * params.dstate +
                                          state_idx;
-                        block_states[state_offset] = prefix_op.running_prefix.y;
+                        block_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     }
 
                     // Store final state

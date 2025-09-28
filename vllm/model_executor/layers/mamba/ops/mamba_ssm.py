@@ -444,9 +444,10 @@ def selective_scan_fn(u,
         max_blocks = (seqlen + block_size - 1) // block_size
 
         # Create the intermediate states tensor
+        # Use same dtype as ssm_states to avoid precision mismatch
         intermediate_states = torch.zeros(
             (batch_size, max_blocks, dim_size, dstate),
-            dtype=torch.float32,
+            dtype=ssm_states.dtype,  # Match ssm_states dtype (e.g., bfloat16)
             device=u.device
         )
 
