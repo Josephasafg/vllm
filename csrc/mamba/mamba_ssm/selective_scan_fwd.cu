@@ -446,7 +446,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         int64_t pad_slot_id,
                         const std::optional<at::Tensor>& intermediate_states,
                         bool cache_enabled,
-                        int block_size) {
+                        int64_t block_size) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -482,7 +482,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
 
     // Set cache parameters
     params.cache_enabled = cache_enabled;
-    params.block_size = block_size;
+    params.block_size = static_cast<int>(block_size);
     params.block_states_ptr = intermediate_states.has_value() ? intermediate_states.value().data_ptr() : nullptr;
 
 
@@ -565,7 +565,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   int64_t pad_slot_id,
                   const std::optional<torch::Tensor> &intermediate_states,
                   bool cache_enabled,
-                  int block_size) {
+                  int64_t block_size) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
