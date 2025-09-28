@@ -359,7 +359,10 @@ def selective_scan_fn(u,
                       query_start_loc=None,
                       cache_indices=None,
                       has_initial_state=None,
-                      pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
+                      pad_slot_id=PAD_SLOT_ID,
+                      cache_enabled=False,
+                      return_intermediate_states=False,
+                      block_size=80) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
         applies changes in place.
@@ -417,11 +420,45 @@ def selective_scan_fn(u,
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
+    # Create intermediate states tensor if caching is enabled
+    intermediate_states = None
+    if cache_enabled:
+        # Determine dimensions for intermediate states
+        # Shape: (batch_or_cache_lines, num_blocks, dim, dstate)
+        # where num_blocks depends on sequence length and block size
+        # For now, create a placeholder tensor - actual dimensions should be determined
+        # based on block_size configuration
+        batch_size = ssm_states.shape[0]
+        dim_size = A.shape[0]
+        dstate = A.shape[1]
+
+        # Calculate max number of blocks needed
+        if query_start_loc is not None:
+            # Variable length - need to handle per-sequence
+            seqlen = u.shape[1]  # Total length for varlen
+        else:
+            seqlen = u.shape[2] if u.dim() == 3 else u.shape[1]
+
+        max_blocks = (seqlen + block_size - 1) // block_size
+
+        # Create the intermediate states tensor
+        intermediate_states = torch.zeros(
+            (batch_size, max_blocks, dim_size, dstate),
+            dtype=torch.float32,
+            device=u.device
+        )
+
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
                            query_start_loc, cache_indices, has_initial_state,
-                           ssm_states, pad_slot_id)
+                           ssm_states, pad_slot_id, intermediate_states, cache_enabled, block_size)
 
-    if z is None:
-        return delta  # output written inplace to delta
+    if return_intermediate_states:
+        if z is None:
+            return delta, intermediate_states  # output written inplace to delta
+        else:
+            return z, intermediate_states  # output written inplace to z
     else:
-        return z  # output written inplace to z
+        if z is None:
+            return delta  # output written inplace to delta
+        else:
+            return z  # output written inplace to z

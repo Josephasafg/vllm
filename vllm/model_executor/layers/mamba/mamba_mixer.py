@@ -367,9 +367,6 @@ class MambaMixer(MambaBase, CustomOp):
             time_proj_bias = self._time_proj_bias()
             
             # APC parameters
-            apc_mamba_block_size = mamba_block_size if cache_enabled else 0
-            apc_enable = cache_enabled
-            apc_intermediate_states = None  # TODO: Create intermediate states tensor if needed
             if (has_initial_states_p is not None):
                 # making a copy of the states
                 if envs.VLLM_USE_V1:
@@ -391,7 +388,10 @@ class MambaMixer(MambaBase, CustomOp):
                 delta_softplus=True,
                 cache_indices=kernel_ssm_indices,
                 has_initial_state=has_initial_states_p,
-                query_start_loc=query_start_loc_p)
+                query_start_loc=query_start_loc_p,
+                return_intermediate_states=cache_enabled,
+                cache_enabled=cache_enabled,
+                block_size=mamba_block_size)
             ssm_outputs.append(scan_out_p)
 
 

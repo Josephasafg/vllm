@@ -437,13 +437,16 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const std::optional<at::Tensor>& D,
                         const std::optional<at::Tensor>& delta_bias,
                         const torch::Tensor ssm_states,
-                        bool has_z, 
+                        bool has_z,
                         bool delta_softplus,
                         const std::optional<at::Tensor>& query_start_loc,
                         const std::optional<at::Tensor>& cache_indices,
                         const std::optional<at::Tensor>& has_initial_state,
                         bool varlen,
-                        int64_t pad_slot_id) {
+                        int64_t pad_slot_id,
+                        const std::optional<at::Tensor>& intermediate_states,
+                        bool cache_enabled,
+                        int block_size) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -476,6 +479,11 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.query_start_loc_ptr = query_start_loc.has_value() ? query_start_loc.value().data_ptr() : nullptr;
     params.cache_indices_ptr = cache_indices.has_value() ? cache_indices.value().data_ptr() : nullptr;
     params.has_initial_state_ptr = has_initial_state.has_value() ? has_initial_state.value().data_ptr() : nullptr;
+
+    // Set cache parameters
+    params.cache_enabled = cache_enabled;
+    params.block_size = block_size;
+    params.block_states_ptr = intermediate_states.has_value() ? intermediate_states.value().data_ptr() : nullptr;
 
 
     // All stride are in elements, not bytes.
@@ -554,7 +562,10 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const torch::Tensor &ssm_states,
                   // used to identify padding entries if cache_indices provided
                   // in case of padding, the kernel will return early
-                  int64_t pad_slot_id) {
+                  int64_t pad_slot_id,
+                  const std::optional<torch::Tensor> &intermediate_states,
+                  bool cache_enabled,
+                  int block_size) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -686,7 +697,10 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        cache_indices,
                        has_initial_state,
                        varlen,
-                       pad_slot_id
+                       pad_slot_id,
+                       intermediate_states,
+                       cache_enabled,
+                       block_size
                        );
 
     
