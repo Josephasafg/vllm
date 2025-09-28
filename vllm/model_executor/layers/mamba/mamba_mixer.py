@@ -233,7 +233,7 @@ class MambaMixer(MambaBase, CustomOp):
 
         forward_context: ForwardContext = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        cache_enabled = None
+
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
@@ -391,10 +391,7 @@ class MambaMixer(MambaBase, CustomOp):
                 delta_softplus=True,
                 cache_indices=kernel_ssm_indices,
                 has_initial_state=has_initial_states_p,
-                query_start_loc=query_start_loc_p,
-                mamba_block_size=apc_mamba_block_size,
-                enable_apc=apc_enable,
-                intermediate_states=apc_intermediate_states)
+                query_start_loc=query_start_loc_p)
             ssm_outputs.append(scan_out_p)
 
 
