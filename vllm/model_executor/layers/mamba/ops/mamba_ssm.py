@@ -435,8 +435,10 @@ def selective_scan_fn(u,
         # Calculate max number of blocks needed
         if query_start_loc is not None:
             # Variable length - need to handle per-sequence
+            batch_size = query_start_loc.shape[0] - 1
             seqlen = u.shape[1]  # Total length for varlen
         else:
+            batch_size = ssm_states.shape[0]
             seqlen = u.shape[2] if u.dim() == 3 else u.shape[1]
 
         max_blocks = (seqlen + block_size - 1) // block_size
