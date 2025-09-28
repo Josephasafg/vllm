@@ -160,21 +160,55 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
     constexpr int kChunkSize = kNThreads * kNItems;
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
-    for (int chunk = 0; chunk < n_chunks; ++chunk) {
-        input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
-        __syncthreads();
-        #pragma unroll
-        for (int r = 0; r < kNRows; ++r) {
-            if constexpr (!kDirectIO) {
-                if (r > 0) { __syncthreads(); }
+    // Get block_states pointer if cache is enabled
+    float *block_states = params.cache_enabled && params.block_states_ptr != nullptr ?
+                          reinterpret_cast<float *>(params.block_states_ptr) : nullptr;
+
+    // Track global position for block caching
+    int global_pos = 0;
+
+    for (int chunk = 0; chunk < n_chunks; ++chunk) {
+        int chunk_start_pos = chunk * kChunkSize;
+        int chunk_seqlen = min(kChunkSize, seqlen - chunk_start_pos);
+
+        // When cache is enabled, we need to process this chunk in blocks
+        int blocks_in_chunk = params.cache_enabled && params.block_size > 0 ?
+                             (chunk_seqlen + params.block_size - 1) / params.block_size : 1;
+
+        for (int block_in_chunk = 0; block_in_chunk < blocks_in_chunk; ++block_in_chunk) {
+            // Calculate the range to process in this iteration
+            int block_start_in_chunk = params.cache_enabled ? block_in_chunk * params.block_size : 0;
+            int block_end_in_chunk = params.cache_enabled ?
+                                    min(block_start_in_chunk + params.block_size, chunk_seqlen) :
+                                    chunk_seqlen;
+            int process_len = block_end_in_chunk - block_start_in_chunk;
+
+            // Calculate global block index for caching
+            int global_block_idx = params.cache_enabled ?
+                                  (chunk_start_pos + block_start_in_chunk) / params.block_size : 0;
+
+            input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
+
+            __syncthreads();
+            #pragma unroll
+            for (int r = 0; r < kNRows; ++r) {
+                if constexpr (!kDirectIO) {
+                    if (r > 0) { __syncthreads(); }
+                }
+                // Load only process_len tokens starting from the correct position
+                input_t *u_ptr = u + block_start_in_chunk + r * params.u_d_stride;
+                input_t *delta_ptr = delta + block_start_in_chunk + r * params.delta_d_stride;
+                load_input<Ktraits>(u_ptr, u_vals[r], smem_load, process_len);
+                if constexpr (!kDirectIO) { __syncthreads(); }
+                load_input<Ktraits>(delta_ptr, delta_vals_load[r], smem_load, process_len);
             }
-            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, seqlen - chunk * kChunkSize);
-            if constexpr (!kDirectIO) { __syncthreads(); }
-            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, seqlen - chunk * kChunkSize);
-        }
-        u += kChunkSize;
-        delta += kChunkSize;
+
+            // Only advance pointers at the end of the chunk, not after each block
+            if (!params.cache_enabled || block_in_chunk == blocks_in_chunk - 1) {
+                u += kChunkSize;
+                delta += kChunkSize;
+            }
     
         float delta_vals[kNRows][kNItems], delta_u_vals[kNRows][kNItems], out_vals[kNRows][kNItems];
         #pragma unroll
@@ -207,8 +241,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             weight_t BC_val[kNRows];
             weight_t B_vals[kNItems], C_vals[kNItems];
             if constexpr (kIsVariableB) {
-                load_weight<Ktraits>(Bvar + state_idx * params.B_dstate_stride, B_vals,
-                    smem_load_weight, (seqlen - chunk * kChunkSize) * (1));
+                // Adjust B pointer for the current block within chunk
+                input_t *B_ptr = Bvar + (params.cache_enabled ? block_start_in_chunk : 0);
+                load_weight<Ktraits>(B_ptr + state_idx * params.B_dstate_stride, B_vals,
+                    smem_load_weight, process_len * (1));
                 if constexpr (!kIsVariableC) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -218,8 +254,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             }
             if constexpr (kIsVariableC) {
                 auto &smem_load_weight_C = !kIsVariableB ? smem_load_weight : smem_load_weight1;
-                load_weight<Ktraits>(Cvar + state_idx * params.C_dstate_stride, C_vals,
-                    smem_load_weight_C, (seqlen - chunk * kChunkSize) * (1 ));
+                // Adjust C pointer for the current block within chunk
+                input_t *C_ptr = Cvar + (params.cache_enabled ? block_start_in_chunk : 0);
+                load_weight<Ktraits>(C_ptr + state_idx * params.C_dstate_stride, C_vals,
+                    smem_load_weight_C, process_len * (1 ));
                 if constexpr (!kIsVariableB) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -243,15 +281,28 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
                                                  !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
                     
-                    if (seqlen % (kNItems * kNThreads) != 0) {  // So that the last state is correct
-                        if (threadIdx.x * kNItems + i >= seqlen - chunk * kChunkSize) {
+                    if (process_len % (kNItems * kNThreads) != 0) {  // So that the last state is correct
+                        if (threadIdx.x * kNItems + i >= process_len) {
                             thread_data[i] = make_float2(1.f, 0.f);
                         }
                     }
                 }
                 // Initialize running total
+                scan_t running_prefix;
 
-                scan_t running_prefix = chunk > 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.0, has_initial_state ? float(ssm_states[state_idx * params.ssm_states_dstate_stride]): 0.0);
+                if (params.cache_enabled && block_states != nullptr && global_block_idx > 0) {
+                    // Load state from previous block
+                    int n_blocks = (seqlen + params.block_size - 1) / params.block_size;
+                    int state_offset = batch_id * n_blocks * params.dim * params.dstate +
+                                      (global_block_idx - 1) * params.dim * params.dstate +
+                                      dim_id * params.dstate +
+                                      state_idx;
+                    running_prefix = make_float2(1.0, block_states[state_offset]);
+                } else if (chunk > 0 || block_in_chunk > 0) {
+                    running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
+                } else {
+                    running_prefix = make_float2(1.0, has_initial_state ? float(ssm_states[state_idx * params.ssm_states_dstate_stride]): 0.0);
+                }
 
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
@@ -260,8 +311,20 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // There's a syncthreads in the scan op, so we don't need to sync here.
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
                 if (threadIdx.x == 0) {
-                    smem_running_prefix[state_idx] = prefix_op.running_prefix;
-                    if (chunk == n_chunks - 1) {
+                    smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
+
+                    // Store state at block boundary if cache is enabled
+                    if (params.cache_enabled && block_states != nullptr) {
+                        int n_blocks = (seqlen + params.block_size - 1) / params.block_size;
+                        int state_offset = batch_id * n_blocks * params.dim * params.dstate +
+                                         global_block_idx * params.dim * params.dstate +
+                                         dim_id * params.dstate +
+                                         state_idx;
+                        block_states[state_offset] = prefix_op.running_prefix.y;
+                    }
+
+                    // Store final state
+                    if (chunk == n_chunks - 1 && block_in_chunk == blocks_in_chunk - 1) {
                         ssm_states[state_idx * params.ssm_states_dstate_stride] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     }
                 }
@@ -275,40 +338,46 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             }
         }
         
-        input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + sequence_start_index * params.out_batch_stride
-            + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
+            // Calculate output position
+            int out_pos = chunk_start_pos + (params.cache_enabled ? block_start_in_chunk : 0);
+            input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + sequence_start_index * params.out_batch_stride
+                + dim_id * kNRows * params.out_d_stride + out_pos;
         __syncthreads();
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
+                store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, process_len);
         }
 
-        if constexpr (kHasZ) {
-            input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + sequence_start_index * params.z_batch_stride
-                + dim_id * kNRows * params.z_d_stride + chunk * kChunkSize;
-            input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + sequence_start_index * params.out_z_batch_stride
-                + dim_id * kNRows * params.out_z_d_stride + chunk * kChunkSize;
+            if constexpr (kHasZ) {
+                input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + sequence_start_index * params.z_batch_stride
+                    + dim_id * kNRows * params.z_d_stride + out_pos;
+                input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + sequence_start_index * params.out_z_batch_stride
+                    + dim_id * kNRows * params.out_z_d_stride + out_pos;
             #pragma unroll
             for (int r = 0; r < kNRows; ++r) {
                 input_t z_vals[kNItems];
                 __syncthreads();
-                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, seqlen - chunk * kChunkSize);
+                    load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, process_len);
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     float z_val = z_vals[i];
                     out_vals[r][i] *= z_val / (1 + expf(-z_val));
                 }
                 __syncthreads();
-                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
+                    store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, process_len);
             }
-        }
+            }
 
-        Bvar += kChunkSize * 1;
-        Cvar += kChunkSize * 1;
-    }
+            // Only advance B and C pointers at the end of chunk
+            if (!params.cache_enabled || block_in_chunk == blocks_in_chunk - 1) {
+                Bvar += kChunkSize * 1;
+                Cvar += kChunkSize * 1;
+            }
+        }  // End of block_in_chunk loop
+    }  // End of chunk loop
 }
 
 template<int kNThreads, int kNItems, typename input_t, typename weight_t, typename state_t>
