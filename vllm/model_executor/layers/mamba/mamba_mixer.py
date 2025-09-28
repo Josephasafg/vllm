@@ -370,6 +370,13 @@ class MambaMixer(MambaBase, CustomOp):
             apc_mamba_block_size = mamba_block_size if cache_enabled else 0
             apc_enable = cache_enabled
             apc_intermediate_states = None  # TODO: Create intermediate states tensor if needed
+            if (has_initial_states_p is not None):
+                # making a copy of the states
+                if envs.VLLM_USE_V1:
+                    kernel_ssm_indices = state_indices_tensor_p
+                    if cache_enabled:
+                        kernel_ssm_indices = state_indices_tensor_p.gather(
+                1, current_last_idx_p.unsqueeze(1)).squeeze(1)
             
             scan_out_p = selective_scan_fn(
                 conv_out_p,
@@ -382,7 +389,7 @@ class MambaMixer(MambaBase, CustomOp):
                 gate_p,
                 time_proj_bias,
                 delta_softplus=True,
-                cache_indices=state_indices_tensor_p,
+                cache_indices=kernel_ssm_indices,
                 has_initial_state=has_initial_states_p,
                 query_start_loc=query_start_loc_p,
                 mamba_block_size=apc_mamba_block_size,
