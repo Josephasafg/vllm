@@ -451,7 +451,7 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor_d_output,
+                conv_state_indices=state_indices_tensor_d,
                 current_last_idx=current_last_idx_d,
                 last_state_idx=last_state_idx_d).transpose(0, 1)
 
