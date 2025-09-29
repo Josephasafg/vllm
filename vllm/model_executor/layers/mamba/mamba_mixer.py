@@ -375,7 +375,7 @@ class MambaMixer(MambaBase, CustomOp):
                         kernel_ssm_indices = state_indices_tensor_p.gather(
                 1, current_last_idx_p.unsqueeze(1)).squeeze(1)
             
-            scan_out_p = selective_scan_fn(
+            scan_result = selective_scan_fn(
                 conv_out_p,
                 ssm_state,
                 discrete_time_step_p,
@@ -392,6 +392,36 @@ class MambaMixer(MambaBase, CustomOp):
                 return_intermediate_states=cache_enabled,
                 cache_enabled=cache_enabled,
                 block_size=mamba_block_size)
+
+            if cache_enabled:
+                # When cache is enabled, selective_scan_fn returns (output, intermediate_states)
+                scan_out_p, intermediate_states = scan_result
+
+                # Store intermediate states back into ssm_state for future runs
+                # Similar to how mamba_mixer2 handles it
+                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
+
+                # Save states for sequences with more than just the final state
+                for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
+                    cache_blocks_to_fill = state_indices_tensor_p[
+                        seq_idx, current_first_idx_p[seq_idx]:
+                        current_first_idx_p[seq_idx] + n_blocks_to_fill[seq_idx]]
+
+                    # Calculate which blocks from intermediate_states to use
+                    # intermediate_states shape: [batch, max_blocks, dim, dstate]
+                    # We need to map the blocks correctly based on sequence position
+                    blocks_to_copy = n_blocks_to_fill[seq_idx].item()
+
+                    # Copy the intermediate states to the appropriate cache blocks
+                    ssm_state[cache_blocks_to_fill] = intermediate_states[
+                        seq_idx, :blocks_to_copy]
+
+                # For all sequences, the final state is already updated in ssm_state
+                # by the kernel itself, so we don't need to update it again
+            else:
+                # When cache is disabled, selective_scan_fn returns just the output
+                scan_out_p = scan_result
+
             ssm_outputs.append(scan_out_p)
 
 
