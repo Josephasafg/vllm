@@ -372,8 +372,16 @@ class MambaMixer(MambaBase, CustomOp):
                 if envs.VLLM_USE_V1:
                     kernel_ssm_indices = state_indices_tensor_p
                     if cache_enabled:
-                        kernel_ssm_indices = state_indices_tensor_p.gather(
-                1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+                        # For continuing requests, load the final state from the previous request
+                        # Check if we have initial states (continuing from previous)
+                        if has_initial_states_p is not None and has_initial_states_p.any():
+                            # Continuing from previous: final state is at last_state_idx_p
+                            kernel_ssm_indices = state_indices_tensor_p.gather(
+                                1, last_state_idx_p.unsqueeze(1)).squeeze(1)
+                        else:
+                            # First request: use current_first_idx_p (though not needed)
+                            kernel_ssm_indices = state_indices_tensor_p.gather(
+                                1, current_first_idx_p.unsqueeze(1)).squeeze(1)
             
             scan_result = selective_scan_fn(
                 conv_out_p,
