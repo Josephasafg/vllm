@@ -326,23 +326,16 @@ class MambaMixer(MambaBase, CustomOp):
                 attn_metadata.current_last_token_block_idx,
                 [num_decodes, num_prefills],
                 dim=0)
+        else:
+            current_first_idx_d, current_first_idx_p = None, None
+            current_last_idx_d, current_last_idx_p = None, None
+            last_state_idx_d, last_state_idx_p = None, None
+            seq_lens_completed_d, seq_lens_completed_p = None, None
 
         
         ssm_outputs = []
 
         if has_prefill:
-            if cache_enabled:
-                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
-                stride_state_indices = state_indices_tensor_p.shape[-1]
-            else:
-                current_first_idx_p = None
-                current_last_idx_p = None
-                seq_lens_completed_p = None
-                last_state_idx_p = None
-                n_blocks_to_fill = None
-                stride_state_indices = 1
-            
-
             # 2. Convolution sequence transformation
             conv_out_p = causal_conv1d_fn(
                 hidden_states_BC_p,
@@ -352,13 +345,11 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
-                n_blocks_to_fill=n_blocks_to_fill,
                 current_first_idx=current_first_idx_p,
                 current_last_idx=current_last_idx_p,
                 last_state_idx=last_state_idx_p,
                 seq_lens_completed=seq_lens_completed_p,
-                stride_cache_chunk=mamba_block_size // 8,
-                stride_state_indices=stride_state_indices,
+                block_size_to_align=mamba_block_size,
                 query_start_loc=query_start_loc_p)
             
             # 3. State Space Model sequence transformations.
@@ -449,8 +440,6 @@ class MambaMixer(MambaBase, CustomOp):
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
-                current_last_idx_d = None
-                last_state_idx_d = None
                 
             # 2. Convolution sequence transformation
             conv_out_d = causal_conv1d_update(
