@@ -357,7 +357,7 @@ class MambaMixer(MambaBase, CustomOp):
                 current_last_idx=current_last_idx_p,
                 last_state_idx=last_state_idx_p,
                 seq_lens_completed=seq_lens_completed_p,
-                stride_cache_chunk=mamba_block_size // 1,
+                stride_cache_chunk=mamba_block_size // 8,
                 stride_state_indices=stride_state_indices,
                 query_start_loc=query_start_loc_p)
             
@@ -381,7 +381,7 @@ class MambaMixer(MambaBase, CustomOp):
                         else:
                             # First request: use current_first_idx_p (though not needed)
                             kernel_ssm_indices = state_indices_tensor_p.gather(
-                                1, current_first_idx_p.unsqueeze(1)).squeeze(1)
+                                1, current_last_idx_p.unsqueeze(1)).squeeze(1)
             
             scan_result = selective_scan_fn(
                 conv_out_p,
