@@ -315,7 +315,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
 
                     // Store state at block boundary if cache is enabled
-                    if (params.cache_enabled && block_states != nullptr) {
+                    if (params.cache_enabled && block_states != nullptr && block_in_chunk != blocks_in_chunk - 1) {
                         int n_blocks = (seqlen + params.block_size - 1) / params.block_size;
                         int state_offset = batch_id * n_blocks * params.dim * params.dstate +
                                          global_block_idx * params.dim * params.dstate +
