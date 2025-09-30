@@ -296,7 +296,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     int n_blocks = (seqlen + params.block_size - 1) / params.block_size;
                     int state_offset = batch_id * n_blocks * params.dim * params.dstate +
                                       (global_block_idx - 1) * params.dim * params.dstate +
-                                      dim_id * params.dstate +
+                                      dim_id * kNRows * params.dstate +
+                                      r * params.dstate +
                                       state_idx;
                     running_prefix = make_float2(1.0, float(block_states[state_offset]));
                 } else if (chunk > 0 || block_in_chunk > 0) {
@@ -319,7 +320,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                         int n_blocks = (seqlen + params.block_size - 1) / params.block_size;
                         int state_offset = batch_id * n_blocks * params.dim * params.dstate +
                                          global_block_idx * params.dim * params.dstate +
-                                         dim_id * params.dstate +
+                                         dim_id * kNRows * params.dstate +
+                                         r * params.dstate +
                                          state_idx;
                         block_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     }
