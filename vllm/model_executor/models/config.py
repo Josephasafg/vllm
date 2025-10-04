@@ -402,8 +402,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             chunk_size = model_config.get_mamba_chunk_size()
             attn_tokens_per_mamba_state = \
                 cdiv(mamba_page_size, attn_page_size_1_token)
-            attn_block_size = chunk_size * \
-                cdiv(attn_tokens_per_mamba_state, chunk_size)
+            
+            if chunk_size is not None:
+                attn_block_size = 256 * cdiv(attn_tokens_per_mamba_state, 256)
+            else:
+                attn_block_size = chunk_size * \
+                    cdiv(attn_tokens_per_mamba_state, chunk_size)
+
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, select minimum valid attention block size

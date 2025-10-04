@@ -317,19 +317,18 @@ class MambaMixer(MambaBase, CustomOp):
             # APC parameters
             if (has_initial_states_p is not None):
                 # making a copy of the states
-                if envs.VLLM_USE_V1:
-                    kernel_ssm_indices = state_indices_tensor_p
-                    if cache_enabled:
-                        # For continuing requests, load the final state from the previous request
-                        # Check if we have initial states (continuing from previous)
-                        if has_initial_states_p is not None and has_initial_states_p.any():
-                            # Continuing from previous: final state is at last_state_idx_p
-                            kernel_ssm_indices = state_indices_tensor_p.gather(
-                                1, last_state_idx_p.unsqueeze(1)).squeeze(1)
-                        else:
-                            # First request: use current_first_idx_p (though not needed)
-                            kernel_ssm_indices = state_indices_tensor_p.gather(
-                                1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+                kernel_ssm_indices = state_indices_tensor_p
+                if prefix_caching_enabled:
+                    # For continuing requests, load the final state from the previous request
+                    # Check if we have initial states (continuing from previous)
+                    if has_initial_states_p is not None and has_initial_states_p.any():
+                        # Continuing from previous: final state is at last_state_idx_p
+                        kernel_ssm_indices = state_indices_tensor_p.gather(
+                            1, last_state_idx_p.unsqueeze(1)).squeeze(1)
+                    else:
+                        # First request: use current_first_idx_p (though not needed)
+                        kernel_ssm_indices = state_indices_tensor_p.gather(
+                            1, current_last_idx_p.unsqueeze(1)).squeeze(1)
 
             scan_result = selective_scan_fn(
                 conv_out_p,
@@ -345,11 +344,11 @@ class MambaMixer(MambaBase, CustomOp):
                 cache_indices=kernel_ssm_indices,
                 has_initial_state=has_initial_states_p,
                 query_start_loc=query_start_loc_p,
-                return_intermediate_states=cache_enabled,
-                cache_enabled=cache_enabled,
+                return_intermediate_states=prefix_caching_enabled,
+                cache_enabled=prefix_caching_enabled,
                 block_size=mamba_block_size)
 
-            if cache_enabled:
+            if prefix_caching_enabled:
                 # When cache is enabled, selective_scan_fn returns (output, intermediate_states)
                 scan_out_p, intermediate_states = scan_result
 
