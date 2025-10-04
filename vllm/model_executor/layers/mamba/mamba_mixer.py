@@ -214,6 +214,8 @@ class MambaMixer(MambaBase, CustomOp):
 
         forward_context: ForwardContext = get_forward_context()
         attn_metadata = forward_context.attn_metadata
+        mamba_block_size = self.cache_config.mamba_block_size
+        prefix_caching_enabled = self.cache_config.enable_prefix_caching
 
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
@@ -227,6 +229,7 @@ class MambaMixer(MambaBase, CustomOp):
             ssm_state = self_kv_cache[1]
             has_initial_states = mamba1_metadata.has_initial_states
             num_padded_decodes = mamba1_metadata.num_padded_decodes
+
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
@@ -269,6 +272,25 @@ class MambaMixer(MambaBase, CustomOp):
         query_start_loc_p = prefill_decode_split.query_start_loc_p
         has_initial_states_p = prefill_decode_split.has_initial_states_p
 
+        if prefix_caching_enabled:
+            # If prefix caching is enabled, retrieve the relevant variables
+            # for prefill and decode
+            last_state_idx_d, last_state_idx_p = torch.split(
+                attn_metadata.last_state_idx, [num_decodes, num_prefills],
+                dim=0)
+            current_last_idx_d, current_last_idx_p = torch.split(
+                attn_metadata.current_last_idx, [num_decodes, num_prefills],
+                dim=0)
+            # Prefill-only variables:
+            current_first_idx_p = attn_metadata.current_first_idx_p
+            context_lens_p = attn_metadata.context_lens_p
+            last_computed_offset_p = attn_metadata.last_computed_offset_p
+        else:
+            last_state_idx_d, last_state_idx_p = None, None
+            current_last_idx_d, current_last_idx_p = None, None
+            current_first_idx_p = None
+            context_lens_p = None
+
         ssm_outputs = []
 
         if has_prefill:
@@ -281,14 +303,35 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
-                query_start_loc=query_start_loc_p)
+                query_start_loc=query_start_loc_p,
+                current_first_idx=current_first_idx_p,
+                current_last_idx=current_last_idx_p,
+                initial_state_idx=last_state_idx_p,
+                context_lens=context_lens_p,
+                block_size_to_align=mamba_block_size)
             # 3. State Space Model sequence transformations.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
                 conv_out_p.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
 
-            # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
-            scan_out_p = selective_scan_fn(
+            # APC parameters
+            if (has_initial_states_p is not None):
+                # making a copy of the states
+                if envs.VLLM_USE_V1:
+                    kernel_ssm_indices = state_indices_tensor_p
+                    if cache_enabled:
+                        # For continuing requests, load the final state from the previous request
+                        # Check if we have initial states (continuing from previous)
+                        if has_initial_states_p is not None and has_initial_states_p.any():
+                            # Continuing from previous: final state is at last_state_idx_p
+                            kernel_ssm_indices = state_indices_tensor_p.gather(
+                                1, last_state_idx_p.unsqueeze(1)).squeeze(1)
+                        else:
+                            # First request: use current_first_idx_p (though not needed)
+                            kernel_ssm_indices = state_indices_tensor_p.gather(
+                                1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+
+            scan_result = selective_scan_fn(
                 conv_out_p,
                 ssm_state,
                 discrete_time_step_p,
@@ -299,12 +342,60 @@ class MambaMixer(MambaBase, CustomOp):
                 gate_p,
                 time_proj_bias,
                 delta_softplus=True,
-                cache_indices=state_indices_tensor_p,
+                cache_indices=kernel_ssm_indices,
                 has_initial_state=has_initial_states_p,
-                query_start_loc=query_start_loc_p)
+                query_start_loc=query_start_loc_p,
+                return_intermediate_states=cache_enabled,
+                cache_enabled=cache_enabled,
+                block_size=mamba_block_size)
+
+            if cache_enabled:
+                # When cache is enabled, selective_scan_fn returns (output, intermediate_states)
+                scan_out_p, intermediate_states = scan_result
+
+                # Store intermediate states back into ssm_state for future runs
+                # Similar to how mamba_mixer2 handles it
+                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
+
+                # Save states for sequences with more than just the final state
+                for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
+                    cache_blocks_to_fill = state_indices_tensor_p[
+                        seq_idx, current_first_idx_p[seq_idx]:
+                        current_first_idx_p[seq_idx] + n_blocks_to_fill[seq_idx]]
+
+                    # Calculate which blocks from intermediate_states to use
+                    # intermediate_states shape: [batch, max_blocks, dim, dstate]
+                    # We need to map the blocks correctly based on sequence position
+                    blocks_to_copy = n_blocks_to_fill[seq_idx].item()
+
+                    # Copy the intermediate states to the appropriate cache blocks
+                    ssm_state[cache_blocks_to_fill] = intermediate_states[
+                        seq_idx, :blocks_to_copy]
+
+                # For all sequences, the final state is already updated in ssm_state
+                # by the kernel itself, so we don't need to update it again
+            else:
+                # When cache is disabled, selective_scan_fn returns just the output
+                scan_out_p = scan_result
+
             ssm_outputs.append(scan_out_p)
 
+
         if has_decode:
+            if prefix_caching_enabled:
+                state_indices_tensor_d_input = \
+                    state_indices_tensor_d.gather(1,
+                        last_state_idx_d.unsqueeze(1)).squeeze(1)
+                state_indices_tensor_d_output = \
+                    state_indices_tensor_d.gather(1,
+                        current_last_idx_d.unsqueeze(1)).squeeze(1)
+                #Note:
+                # for decode always: current_first_idx_d == current_last_idx_d
+                # at block boundaries: current_first_idx_d > last_state_idx_d
+            else:
+                # Without caching, read and write in-place to the same blocks:
+                state_indices_tensor_d_input = state_indices_tensor_d
+                state_indices_tensor_d_output = state_indices_tensor_d
             # 2. Convolution sequence transformation
             conv_out_d = causal_conv1d_update(
                 hidden_states_BC_d.transpose(0, 1),
@@ -312,7 +403,10 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor_d).transpose(0, 1)
+                conv_state_indices=state_indices_tensor_d,
+                current_last_idx=current_last_idx_d,
+                initial_state_idx=last_state_idx_d,
+                ).transpose(0, 1)
 
             # 3. State Space Model sequence transformation.
             discrete_time_step_d, B_d, C_d = self._ssm_transform(
@@ -332,7 +426,8 @@ class MambaMixer(MambaBase, CustomOp):
                                    gate_d.transpose(0, 1),
                                    time_proj_bias,
                                    dt_softplus=True,
-                                   state_batch_indices=state_indices_tensor_d,
+                                   state_batch_indices=state_indices_tensor_d_input,
+                                   dst_state_batch_indices=state_indices_tensor_d_output,
                                    out=scan_outputs_d)
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
