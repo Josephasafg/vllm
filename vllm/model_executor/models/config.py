@@ -403,7 +403,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             attn_tokens_per_mamba_state = \
                 cdiv(mamba_page_size, attn_page_size_1_token)
             
-            if chunk_size is not None:
+            if chunk_size is None:
                 attn_block_size = 256 * cdiv(attn_tokens_per_mamba_state, 256)
             else:
                 attn_block_size = chunk_size * \
