@@ -36,10 +36,6 @@ class Mamba1AttentionMetadata:
     num_decode_tokens: int
     num_padded_decodes: int
     
-    # last_chunk_indices_p is a tensor of shape (batch,) that contains the
-    # index of the last chunk for every sequence in the (prefill) batch.
-    last_chunk_indices_p: Optional[torch.Tensor]
-
     state_indices_tensor: torch.Tensor  # shape: [batch,]
     current_last_idx: torch.Tensor
     current_first_idx_p: torch.Tensor
@@ -84,19 +80,18 @@ class Mamba1AttentionMetadataBuilder(
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
 
-        state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
         context_lens_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
             query_start_loc.device)
-        
-
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold))
-
-        has_initial_states = None
+        
         padded_decodes = num_decodes
+        context_lens, context_lens_p = None, None
+        current_first_idx, current_first_idx_p = None, None
+        last_computed_offset, last_computed_offset_p = None, None
         mamba_block_size = self.kv_cache_spec.block_size
 
         if self.vllm_config.cache_config.enable_prefix_caching:
@@ -108,10 +103,8 @@ class Mamba1AttentionMetadataBuilder(
             seq_lens_pending = (
                 torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
                 common_attn_metadata.query_start_loc)[:-1]
-            context_lens = common_attn_metadata.seq_lens - \
-                                 seq_lens_pending
-            last_computed_offset = \
-                context_lens % mamba_block_size
+            context_lens = seq_lens - seq_lens_pending
+            last_computed_offset = context_lens % mamba_block_size
             # Indices: last_computed <= current_first <= current_last
             # Cases:
             #  last_computed == current_first  if last state was partially
@@ -128,10 +121,11 @@ class Mamba1AttentionMetadataBuilder(
                 last_state_idx.clamp(min=0)
         else:
             # Always return just a single block per each request:
-            state_indices_tensor = common_attn_metadata.block_table_tensor[:,
-                                                                           0]
+            state_indices_tensor = common_attn_metadata.block_table_tensor[:,0]
             current_last_idx = None
             last_state_idx = None
+
+        has_initial_states = None
 
         if num_prefills > 0:
             has_initial_states = context_lens_tensor > 0
@@ -146,12 +140,12 @@ class Mamba1AttentionMetadataBuilder(
                 current_first_idx_p = current_first_idx[num_reqs -
                                                         num_prefills:num_reqs]
 
-        elif (num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs
-              and self.compilation_config.full_cuda_graph):
-            state_indices_for_decode = state_indices_tensor[:num_decodes]
+        elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs:
+            self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,
+                                                          non_blocking=True)
             padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
-            self.state_indices_tensor[:num_decodes].copy_(
-                state_indices_for_decode, non_blocking=True)
+            self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,
+                                                          non_blocking=True)
             state_indices_tensor = self.state_indices_tensor[:padded_decodes]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
@@ -178,8 +172,6 @@ class Mamba1AttentionMetadataBuilder(
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_padded_decodes=padded_decodes,
-            cache_spec=self.kv_cache_spec,
-            seq_lens=seq_lens,
             current_last_idx=current_last_idx,
             current_first_idx_p=current_first_idx_p,
             last_state_idx=last_state_idx,
