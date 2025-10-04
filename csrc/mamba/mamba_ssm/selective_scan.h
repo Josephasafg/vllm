@@ -67,7 +67,7 @@ struct SSMParamsBase {
     void *__restrict__ query_start_loc_ptr;
     void *__restrict__ cache_indices_ptr;
     void *__restrict__ has_initial_state_ptr;
-    void *__restrict__ block_states_ptr;
+    void *__restrict__ intermediate_states_ptr;
 
 };
 

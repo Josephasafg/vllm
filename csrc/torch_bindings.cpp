@@ -605,7 +605,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! ssm_states,"
       "int pad_slot_id,"
       "Tensor? intermediate_states,"
-      "bool cache_enabled,"
       "int block_size) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 

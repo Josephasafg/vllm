@@ -363,7 +363,6 @@ def selective_scan_fn(u,
                       cache_indices=None,
                       has_initial_state=None,
                       pad_slot_id=PAD_SLOT_ID,
-                      cache_enabled=False,
                       return_intermediate_states=False,
                       block_size=80) -> torch.Tensor:
     """
@@ -423,14 +422,12 @@ def selective_scan_fn(u,
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
-    # Create intermediate states tensor if caching is enabled
+    # Create intermediate states tensor if return_intermediate_states is requested
     intermediate_states = None
-    if cache_enabled:
+    if return_intermediate_states:
         # Determine dimensions for intermediate states
         # Shape: (batch_or_cache_lines, num_blocks, dim, dstate)
         # where num_blocks depends on sequence length and block size
-        # For now, create a placeholder tensor - actual dimensions should be determined
-        # based on block_size configuration
         batch_size = ssm_states.shape[0]
         dim_size = A.shape[0]
         dstate = A.shape[1]
@@ -456,7 +453,7 @@ def selective_scan_fn(u,
 
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
                            query_start_loc, cache_indices, has_initial_state,
-                           ssm_states, pad_slot_id, intermediate_states, cache_enabled, block_size)
+                           ssm_states, pad_slot_id, intermediate_states, block_size)
 
     if return_intermediate_states:
         if z is None:

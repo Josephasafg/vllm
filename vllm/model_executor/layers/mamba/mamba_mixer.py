@@ -344,7 +344,6 @@ class MambaMixer(MambaBase, CustomOp):
                 has_initial_state=has_initial_states_p,
                 query_start_loc=query_start_loc_p,
                 return_intermediate_states=prefix_caching_enabled,
-                cache_enabled=prefix_caching_enabled,
                 block_size=mamba_block_size)
 
             if prefix_caching_enabled:

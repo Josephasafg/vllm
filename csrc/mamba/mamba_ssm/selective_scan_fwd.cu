@@ -161,10 +161,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     constexpr int kChunkSize = kNThreads * kNItems;
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
 
-    // Get block_states pointer if cache is enabled
+    // Get intermediate_states pointer if cache is enabled
     // Use the same type as state_t to match intermediate_states dtype
-    typename Ktraits::state_t *block_states = params.cache_enabled && params.block_states_ptr != nullptr ?
-                          reinterpret_cast<typename Ktraits::state_t *>(params.block_states_ptr) : nullptr;
+    typename Ktraits::state_t *intermediate_states = params.cache_enabled && params.intermediate_states_ptr != nullptr ?
+                          reinterpret_cast<typename Ktraits::state_t *>(params.intermediate_states_ptr) : nullptr;
 
     // Track global position for block caching
     int global_pos = 0;
@@ -291,7 +291,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // Initialize running total
                 scan_t running_prefix;
 
-                if (params.cache_enabled && block_states != nullptr && global_block_idx > 0) {
+                if (params.cache_enabled && intermediate_states != nullptr && global_block_idx > 0) {
                     // Load state from previous block
                     int n_blocks = (seqlen + params.block_size - 1) / params.block_size;
                     int state_offset = batch_id * n_blocks * params.dim * params.dstate +
@@ -299,7 +299,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                       dim_id * kNRows * params.dstate +
                                       r * params.dstate +
                                       state_idx;
-                    running_prefix = make_float2(1.0, float(block_states[state_offset]));
+                    running_prefix = make_float2(1.0, float(intermediate_states[state_offset]));
                 } else if (chunk > 0 || block_in_chunk > 0) {
                     running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
                 } else {
@@ -316,14 +316,14 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
 
                     // Store state at block boundary if cache is enabled
-                    if (params.cache_enabled && block_states != nullptr && block_in_chunk != blocks_in_chunk - 1) {
+                    if (params.cache_enabled && intermediate_states != nullptr && block_in_chunk != blocks_in_chunk - 1) {
                         int n_blocks = (seqlen + params.block_size - 1) / params.block_size;
                         int state_offset = batch_id * n_blocks * params.dim * params.dstate +
                                          global_block_idx * params.dim * params.dstate +
                                          dim_id * kNRows * params.dstate +
                                          r * params.dstate +
                                          state_idx;
-                        block_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
+                        intermediate_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     }
 
                     // Store final state
@@ -517,7 +517,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         bool varlen,
                         int64_t pad_slot_id,
                         const std::optional<at::Tensor>& intermediate_states,
-                        bool cache_enabled,
                         int64_t block_size) {
 
     // Reset the parameters
@@ -553,9 +552,10 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.has_initial_state_ptr = has_initial_state.has_value() ? has_initial_state.value().data_ptr() : nullptr;
 
     // Set cache parameters
-    params.cache_enabled = cache_enabled;
+    // cache is enabled if intermediate_states tensor is provided
+    params.intermediate_states_ptr = intermediate_states.has_value() ? intermediate_states.value().data_ptr() : nullptr;
+    params.cache_enabled = intermediate_states.has_value();
     params.block_size = static_cast<int>(block_size);
-    params.block_states_ptr = intermediate_states.has_value() ? intermediate_states.value().data_ptr() : nullptr;
 
 
     // All stride are in elements, not bytes.
@@ -636,7 +636,6 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   // in case of padding, the kernel will return early
                   int64_t pad_slot_id,
                   const std::optional<torch::Tensor> &intermediate_states,
-                  bool cache_enabled,
                   int64_t block_size) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
@@ -771,7 +770,6 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        varlen,
                        pad_slot_id,
                        intermediate_states,
-                       cache_enabled,
                        block_size
                        );
 
