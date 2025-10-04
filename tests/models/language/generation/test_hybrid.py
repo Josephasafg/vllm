@@ -19,6 +19,8 @@ pytestmark = pytest.mark.hybrid_model
 # meaning that it will be used in all tests in this file
 # The rest of the models will only be tested by test_models
 
+APC_MULTIPLY_BY = 50
+
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
     "tiiuae/falcon-mamba-tiny-dev",
@@ -398,10 +400,8 @@ def test_apc_single_prompt(
     compare_operator: Callable = check_logprobs_close \
           if num_logprobs > 0 else check_outputs_equal # type: ignore
 
-    MULTIPLE = 300
-
     # Sample prompts.
-    generated_prompts = [MULTIPLE * example_prompts[0]]
+    generated_prompts = [APC_MULTIPLY_BY * example_prompts[0]]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
@@ -461,10 +461,8 @@ def test_apc_single_prompt_block_align_alignment(
     compare_operator: Callable = check_logprobs_close \
                     if num_logprobs > 0 else check_outputs_equal # type: ignore
 
-    MULTIPLE = 300
-
     # Sample prompts. This custom prompt is used, as it causes the most issues
-    generated_prompts = ["The president of the United States is " * MULTIPLE]
+    generated_prompts = ["The president of the United States is " * APC_MULTIPLY_BY]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
@@ -545,10 +543,8 @@ def test_apc_multiple_prompts_all_cached_outputs(
     compare_operator: Callable = check_logprobs_close \
         if num_logprobs > 0 else check_outputs_equal # type: ignore
 
-    MULTIPLE = 300
-
     # Sample prompts.
-    generated_prompts = [MULTIPLE * prompt for prompt in example_prompts]
+    generated_prompts = [APC_MULTIPLY_BY * prompt for prompt in example_prompts]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
@@ -579,7 +575,7 @@ def test_apc_multiple_prompts_all_cached_outputs(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -609,13 +605,11 @@ def test_apc_multiple_prompts_block_align_alignment(
     compare_operator: Callable = check_logprobs_close \
         if num_logprobs > 0 else check_outputs_equal # type: ignore
 
-    MULTIPLE = 300
-
     # Sample prompts. This custom prompt is used, as it causes the most issues
     prompt_text = "The president of the United States is "
     prompt_offsets = [0, 3, 7, 13, 17, 22, 25, 31]
     generated_prompts = [
-        prompt_text[offset:] * MULTIPLE for offset in prompt_offsets
+        prompt_text[offset:] * APC_MULTIPLY_BY for offset in prompt_offsets
     ]
 
     max_model_len = max(
@@ -697,10 +691,8 @@ def test_apc_multiple_prompts_partial_cached_outputs(
     compare_operator: Callable = check_logprobs_close \
         if num_logprobs > 0 else check_outputs_equal # type: ignore
 
-    MULTIPLE = 300
-
     # Sample prompts.
-    generated_prompts = [MULTIPLE * prompt for prompt in example_prompts]
+    generated_prompts = [APC_MULTIPLY_BY * prompt for prompt in example_prompts]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
