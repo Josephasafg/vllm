@@ -601,6 +601,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool delta_softplus,"
       "Tensor? query_start_loc,"
       "Tensor? cache_indices,"
+      "Tensor? load_indices,"
       "Tensor? has_initial_state,"
       "Tensor! ssm_states,"
       "int pad_slot_id,"

@@ -361,6 +361,7 @@ def selective_scan_fn(u,
                       delta_softplus=False,
                       query_start_loc=None,
                       cache_indices=None,
+                      load_indices=None,
                       has_initial_state=None,
                       pad_slot_id=PAD_SLOT_ID,
                       return_intermediate_states=False,
@@ -385,8 +386,11 @@ def selective_scan_fn(u,
         for example: query_start_loc = torch.Tensor([0,10,16,17]), 
         x.shape=(dim,17)
     cache_indices: (batch) int32
-        A tensor with each cell is a correspondent 
-        input and output ssm_state index
+        A tensor with each cell is a correspondent
+        output ssm_state index (where to store final state)
+    load_indices: (batch) int32
+        A tensor with each cell is a correspondent
+        input ssm_state index (where to load initial state from)
     has_initial_state: (batch) bool
         A tensor populated with ones and zeros, 
         indicate if the ssm_state at the corresponding index should be 
@@ -450,8 +454,12 @@ def selective_scan_fn(u,
             device=u.device
         )
 
+    # If load_indices is not provided, use cache_indices for both load and store
+    if load_indices is None:
+        load_indices = cache_indices
+
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
-                           query_start_loc, cache_indices, has_initial_state,
+                           query_start_loc, cache_indices, load_indices, has_initial_state,
                            ssm_states, pad_slot_id, intermediate_states, block_size)
 
     if return_intermediate_states:
