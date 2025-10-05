@@ -166,9 +166,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     typename Ktraits::state_t *intermediate_states = params.cache_enabled && params.intermediate_states_ptr != nullptr ?
                           reinterpret_cast<typename Ktraits::state_t *>(params.intermediate_states_ptr) : nullptr;
 
-    // Track global position for block caching
-    int global_pos = 0;
-
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         int chunk_start_pos = chunk * kChunkSize;
         int chunk_seqlen = min(kChunkSize, seqlen - chunk_start_pos);
