@@ -422,7 +422,6 @@ def selective_scan_fn(u,
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
-    # Create intermediate states tensor if return_intermediate_states is requested
     intermediate_states = None
     if return_intermediate_states:
         # Determine dimensions for intermediate states
@@ -431,19 +430,11 @@ def selective_scan_fn(u,
         batch_size = ssm_states.shape[0]
         dim_size = A.shape[0]
         dstate = A.shape[1]
-
-        # Calculate max number of blocks needed
-        if query_start_loc is not None:
-            # Variable length - need to handle per-sequence
-            batch_size = query_start_loc.shape[0] - 1
-            seqlen = u.shape[1]  # Total length for varlen
-        else:
-            batch_size = ssm_states.shape[0]
-            seqlen = u.shape[2] if u.dim() == 3 else u.shape[1]
+        batch_size = query_start_loc.shape[0] - 1
+        seqlen = u.shape[1]  # Total length for varlen
 
         max_blocks = (seqlen + block_size - 1) // block_size
 
-        # Use same dtype as ssm_states to avoid precision mismatch
         intermediate_states = torch.zeros(
             (batch_size, max_blocks, dim_size, dstate),
             dtype=ssm_states.dtype,
@@ -456,9 +447,9 @@ def selective_scan_fn(u,
 
     if return_intermediate_states:
         if z is None:
-            return delta, intermediate_states  # output written inplace to delta
+            return delta, intermediate_states
         else:
-            return z, intermediate_states  # output written inplace to z
+            return z, intermediate_states
     else:
         if z is None:
             return delta  # output written inplace to delta
