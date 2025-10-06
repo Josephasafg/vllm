@@ -272,18 +272,15 @@ class MambaMixer(MambaBase, CustomOp):
         has_initial_states_p = prefill_decode_split.has_initial_states_p
 
         if prefix_caching_enabled:
-            # If prefix caching is enabled, retrieve the relevant variables
-            # for prefill and decode
             last_state_idx_d, last_state_idx_p = torch.split(
                 attn_metadata.last_state_idx, [num_decodes, num_prefills],
                 dim=0)
             current_last_idx_d, current_last_idx_p = torch.split(
                 attn_metadata.current_last_idx, [num_decodes, num_prefills],
                 dim=0)
-            # Prefill-only variables:
+
             current_first_idx_p = attn_metadata.current_first_idx_p
             context_lens_p = attn_metadata.context_lens_p
-            last_computed_offset_p = attn_metadata.last_computed_offset_p
         else:
             last_state_idx_d, last_state_idx_p = None, None
             current_last_idx_d, current_last_idx_p = None, None
@@ -345,22 +342,15 @@ class MambaMixer(MambaBase, CustomOp):
                 block_size=mamba_block_size)
 
             if prefix_caching_enabled:
-                # When cache is enabled, selective_scan_fn returns (output, intermediate_states)
                 scan_out_p, intermediate_states = scan_result
 
-                # Store intermediate states back into ssm_state for future runs
-                # Similar to how mamba_mixer2 handles it
                 n_blocks_to_fill = current_last_idx_p - current_first_idx_p
 
-                # Save states for sequences with more than just the final state
                 for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
                     cache_blocks_to_fill = state_indices_tensor_p[
                         seq_idx, current_first_idx_p[seq_idx]:
                         current_first_idx_p[seq_idx] + n_blocks_to_fill[seq_idx]]
 
-                    # Calculate which blocks from intermediate_states to use
-                    # intermediate_states shape: [batch, max_blocks, dim, dstate]
-                    # We need to map the blocks correctly based on sequence position
                     blocks_to_copy = n_blocks_to_fill[seq_idx].item()
 
                     # Copy the intermediate states to the appropriate cache blocks
@@ -379,7 +369,6 @@ class MambaMixer(MambaBase, CustomOp):
                         ssm_state[store_state_indices[seq_idx]] = intermediate_states[
                             seq_idx, relative_last_idx]
             else:
-                # When cache is disabled, selective_scan_fn returns just the output
                 scan_out_p = scan_result
 
             ssm_outputs.append(scan_out_p)
@@ -393,11 +382,7 @@ class MambaMixer(MambaBase, CustomOp):
                 state_indices_tensor_d_output = \
                     state_indices_tensor_d.gather(1,
                         current_last_idx_d.unsqueeze(1)).squeeze(1)
-                #Note:
-                # for decode always: current_first_idx_d == current_last_idx_d
-                # at block boundaries: current_first_idx_d > last_state_idx_d
             else:
-                # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
             # 2. Convolution sequence transformation
