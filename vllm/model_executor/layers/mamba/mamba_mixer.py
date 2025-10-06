@@ -325,6 +325,7 @@ class MambaMixer(MambaBase, CustomOp):
                     # Fresh request: both indices point to current_last_idx
                     kernel_ssm_indices = state_indices_tensor_p.gather(
                         1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+                    store_state_indices = kernel_ssm_indices
 
             scan_result = selective_scan_fn(
                 conv_out_p,

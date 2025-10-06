@@ -19,7 +19,7 @@ pytestmark = pytest.mark.hybrid_model
 # meaning that it will be used in all tests in this file
 # The rest of the models will only be tested by test_models
 
-APC_MULTIPLY_BY = 50
+APC_MULTIPLY_BY = 100
 
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
@@ -370,7 +370,7 @@ def _get_vLLM_output(vllm_runner,
     return outs, vllm_model
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0] + HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -431,7 +431,7 @@ def test_apc_single_prompt(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0] + HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -513,7 +513,7 @@ def test_apc_single_prompt_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0] + HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -661,7 +661,7 @@ def test_apc_multiple_prompts_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0] + HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
