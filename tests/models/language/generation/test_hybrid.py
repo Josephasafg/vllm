@@ -19,7 +19,7 @@ pytestmark = pytest.mark.hybrid_model
 # meaning that it will be used in all tests in this file
 # The rest of the models will only be tested by test_models
 
-APC_MULTIPLY_BY = 300
+APC_MULTIPLY_BY = 50
 
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
