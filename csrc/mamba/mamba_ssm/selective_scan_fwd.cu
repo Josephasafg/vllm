@@ -393,8 +393,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 Bvar += kChunkSize * 1;
                 Cvar += kChunkSize * 1;
             }
-        }  // End of current_block_in_chunk loop
-    }  // End of chunk loop
+        }
+    }
 }
 
 template<int kNThreads, int kNItems, typename input_t, typename weight_t, typename state_t>
