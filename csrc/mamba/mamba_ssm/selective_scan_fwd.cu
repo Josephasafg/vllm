@@ -121,7 +121,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
 
-    // Use cache_indices for both loading and storing
     const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
 
     // cache_index == params.pad_slot_id is defined as padding, so we exit early
@@ -137,7 +136,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + sequence_start_index * params.B_batch_stride + group_id * params.B_group_stride;
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + sequence_start_index * params.C_batch_stride + group_id * params.C_group_stride;
-    // Single pointer for ssm_states (always use cache_index)
+
     typename Ktraits::state_t *ssm_states = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
         cache_index * params.ssm_states_batch_stride +
         dim_id * kNRows * params.ssm_states_dim_stride;
@@ -175,7 +174,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int n_blocks = params.cache_enabled ?
                         (seqlen + params.block_size - 1) / params.block_size : 0;
 
-    // Pre-calculate base offset for intermediate states (common for all state_idx)
     const int batch_dim_offset = params.cache_enabled ?
                                  batch_id * n_blocks * params.dim * params.dstate +
                                  dim_id * kNRows * params.dstate : 0;
