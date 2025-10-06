@@ -314,26 +314,17 @@ class MambaMixer(MambaBase, CustomOp):
             time_proj_bias = self._time_proj_bias()
 
             # APC parameters - separate indices for loading and storing
+            kernel_ssm_indices = state_indices_tensor_p
             if prefix_caching_enabled:
-                # Load index: where to load initial state from (for continuation)
-                # Store index: where to store the final state after computation
-
                 if has_initial_states_p is not None and has_initial_states_p.any():
-                    # Continuation: load from last_state_idx, store to current_last_idx
-                    load_state_indices = state_indices_tensor_p.gather(
+                    kernel_ssm_indices = state_indices_tensor_p.gather(
                         1, last_state_idx_p.unsqueeze(1)).squeeze(1)
                     store_state_indices = state_indices_tensor_p.gather(
                         1, current_last_idx_p.unsqueeze(1)).squeeze(1)
                 else:
                     # Fresh request: both indices point to current_last_idx
-                    indices = state_indices_tensor_p.gather(
+                    kernel_ssm_indices = state_indices_tensor_p.gather(
                         1, current_last_idx_p.unsqueeze(1)).squeeze(1)
-                    load_state_indices = indices
-                    store_state_indices = indices
-            else:
-                # No prefix caching: use default state_indices_tensor_p
-                load_state_indices = state_indices_tensor_p
-                store_state_indices = state_indices_tensor_p
 
             scan_result = selective_scan_fn(
                 conv_out_p,
@@ -346,8 +337,7 @@ class MambaMixer(MambaBase, CustomOp):
                 gate_p,
                 time_proj_bias,
                 delta_softplus=True,
-                cache_indices=store_state_indices,  # Where to store final state
-                load_indices=load_state_indices,    # Where to load initial state
+                cache_indices=kernel_ssm_indices,
                 has_initial_state=has_initial_states_p,
                 query_start_loc=query_start_loc_p,
                 return_intermediate_states=prefix_caching_enabled,
@@ -376,8 +366,17 @@ class MambaMixer(MambaBase, CustomOp):
                     ssm_state[cache_blocks_to_fill] = intermediate_states[
                         seq_idx, :blocks_to_copy]
 
-                # For all sequences, the final state is already updated in ssm_state
-                # by the kernel itself, so we don't need to update it again
+                # Store the final state from intermediate_states to ssm_state
+                # The kernel stores ALL blocks to intermediate_states at relative positions
+                for seq_idx in range(num_prefills):
+                    # current_last_idx_p is absolute, but intermediate_states is relative
+                    # The relative index is current_last - current_first
+                    relative_last_idx = current_last_idx_p[seq_idx] - current_first_idx_p[seq_idx]
+
+                    # Only store if we have this block in intermediate_states
+                    if relative_last_idx >= 0 and relative_last_idx < intermediate_states.shape[1]:
+                        ssm_state[store_state_indices[seq_idx]] = intermediate_states[
+                            seq_idx, relative_last_idx]
             else:
                 # When cache is disabled, selective_scan_fn returns just the output
                 scan_out_p = scan_result

@@ -1433,14 +1433,13 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                        delta_softplus: bool,
                        query_start_loc: Optional[torch.Tensor],
                        cache_indices: Optional[torch.Tensor],
-                       load_indices: Optional[torch.Tensor],
                        has_initial_state: Optional[torch.Tensor],
                        ssm_states: torch.Tensor, pad_slot_id: int,
                        intermediate_states: Optional[torch.Tensor] = None,
                        block_size: int = 80):
     torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_, delta_bias_,
                                     delta_softplus, query_start_loc,
-                                    cache_indices, load_indices, has_initial_state,
+                                    cache_indices, has_initial_state,
                                     ssm_states, pad_slot_id,
                                     intermediate_states, block_size)
 

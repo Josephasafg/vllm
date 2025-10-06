@@ -117,16 +117,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
         : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
 
-    // Separate indices for loading and storing
+    // Single index for both loading and storing
     const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
-    const int* load_indices = params.load_indices_ptr == nullptr ? nullptr
-        : reinterpret_cast<int *>(params.load_indices_ptr);
 
-    // For storing: use cache_indices
+    // Use cache_indices for both loading and storing
     const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
-    // For loading: use load_indices if available, otherwise use cache_indices
-    const int load_index = load_indices == nullptr ? cache_index : load_indices[batch_id];
 
     // cache_index == params.pad_slot_id is defined as padding, so we exit early
     if (cache_index == params.pad_slot_id){
@@ -141,11 +137,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + sequence_start_index * params.B_batch_stride + group_id * params.B_group_stride;
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + sequence_start_index * params.C_batch_stride + group_id * params.C_group_stride;
-    // Separate pointers for loading and storing states
-    typename Ktraits::state_t *ssm_states_load = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
-        load_index * params.ssm_states_batch_stride +
-        dim_id * kNRows * params.ssm_states_dim_stride;
-    typename Ktraits::state_t *ssm_states_store = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
+    // Single pointer for ssm_states (always use cache_index)
+    typename Ktraits::state_t *ssm_states = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
         cache_index * params.ssm_states_batch_stride +
         dim_id * kNRows * params.ssm_states_dim_stride;
     
@@ -323,8 +316,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 } else if (chunk > 0 || current_block_in_chunk > 0) {
                     running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
                 } else {
-                    // Load initial state from load_index location
-                    running_prefix = make_float2(1.0, has_initial_state ? float(ssm_states_load[state_idx * params.ssm_states_dstate_stride]): 0.0);
+                    // Load initial state from cache_index location
+                    running_prefix = make_float2(1.0, has_initial_state ? float(ssm_states[state_idx * params.ssm_states_dstate_stride]): 0.0);
                 }
 
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
@@ -337,7 +330,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
 
                     // Store state at block boundary if cache is enabled
-                    if (params.cache_enabled && intermediate_states != nullptr && current_block_in_chunk != total_blocks_in_chunk - 1) {
+                    // Store ALL blocks to intermediate_states, including the last one
+                    if (params.cache_enabled && intermediate_states != nullptr) {
                         int state_offset = batch_dim_offset +
                                          block_state_offset +
                                          r * params.dstate +
@@ -345,9 +339,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                         intermediate_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     }
 
-                    // Store final state to store_index location
-                    if (chunk == n_chunks - 1 && current_block_in_chunk == total_blocks_in_chunk - 1) {
-                        ssm_states_store[state_idx * params.ssm_states_dstate_stride] = typename Ktraits::state_t(prefix_op.running_prefix.y);
+                    // For non-cached mode, store final state directly to ssm_states
+                    // For cached mode, state is stored in intermediate_states
+                    if (!params.cache_enabled && chunk == n_chunks - 1 && current_block_in_chunk == total_blocks_in_chunk - 1) {
+                        ssm_states[state_idx * params.ssm_states_dstate_stride] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     }
                 }
                 #pragma unroll
@@ -569,7 +564,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.out_z_ptr = has_z ? out_z.data_ptr() : nullptr;
     params.query_start_loc_ptr = query_start_loc.has_value() ? query_start_loc.value().data_ptr() : nullptr;
     params.cache_indices_ptr = cache_indices.has_value() ? cache_indices.value().data_ptr() : nullptr;
-    params.load_indices_ptr = load_indices.has_value() ? load_indices.value().data_ptr() : nullptr;
     params.has_initial_state_ptr = has_initial_state.has_value() ? has_initial_state.value().data_ptr() : nullptr;
 
     // Set cache parameters
@@ -651,7 +645,6 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   bool delta_softplus,
                   const std::optional<torch::Tensor> &query_start_loc,
                   const std::optional<torch::Tensor> &cache_indices,
-                  const std::optional<torch::Tensor> &load_indices,
                   const std::optional<torch::Tensor> &has_initial_state,
                   const torch::Tensor &ssm_states,
                   // used to identify padding entries if cache_indices provided
