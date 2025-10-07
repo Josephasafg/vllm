@@ -9,16 +9,16 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.utils import cdiv
-from vllm.v1.attention.backends.mamba_attn import (
-    BaseMambaAttentionMetadataBuilder)
-from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
-                                              split_decodes_and_prefills)
+from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import (
+    CommonAttentionMetadata,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 from vllm.config import VllmConfig
 
 
 class Mamba1AttentionBackend(AttentionBackend):
-
     @staticmethod
     def get_builder_cls() -> type["Mamba1AttentionMetadataBuilder"]:
         return Mamba1AttentionMetadataBuilder
@@ -35,7 +35,7 @@ class Mamba1AttentionMetadata:
     num_decodes: int
     num_decode_tokens: int
     num_padded_decodes: int
-    
+
     state_indices_tensor: torch.Tensor  # shape: [batch,]
     current_last_idx: torch.Tensor
     current_first_idx_p: torch.Tensor
@@ -46,7 +46,7 @@ class Mamba1AttentionMetadata:
 
 class Mamba1AttentionMetadataBuilder(
         BaseMambaAttentionMetadataBuilder[Mamba1AttentionMetadata]):
-    
+
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -69,7 +69,7 @@ class Mamba1AttentionMetadataBuilder(
                 dtype=torch.int32,
                 device=device,
             )
-    
+
     def build(
         self,
         common_prefix_len: int,
@@ -81,18 +81,19 @@ class Mamba1AttentionMetadataBuilder(
         seq_lens = common_attn_metadata.seq_lens
 
         context_lens_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
-            query_start_loc.device)
+            query_start_loc.device
+        )
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold))
-        
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+            )
+        )
+
         padded_decodes = num_decodes
         context_lens, context_lens_p = None, None
         current_first_idx, current_first_idx_p = None, None
         last_computed_offset, last_computed_offset_p = None, None
-        mamba_block_size = self.kv_cache_spec.block_size
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
@@ -140,12 +141,16 @@ class Mamba1AttentionMetadataBuilder(
                 current_first_idx_p = current_first_idx[num_reqs -
                                                         num_prefills:num_reqs]
 
-        elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs:
+        elif (
+            num_decodes > 0
+            and num_decodes <= self.decode_cudagraph_max_bs
+        ):
             self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,
                                                           non_blocking=True)
             padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,
-                                                          non_blocking=True)
+                                                          non_blocking=True
+            )
             state_indices_tensor = self.state_indices_tensor[:padded_decodes]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
