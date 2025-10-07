@@ -87,6 +87,7 @@ class Mamba1AttentionMetadataBuilder(
         )
 
         has_initial_states_p = None
+        query_start_loc_p = None
         padded_decodes = num_decodes
         num_computed_tokens, num_computed_tokens_p = None, None
         block_idx_first_scheduled_token = None

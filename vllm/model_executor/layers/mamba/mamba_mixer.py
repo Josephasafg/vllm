@@ -282,9 +282,7 @@ class MambaMixer(MambaBase, CustomOp):
             gate,
             state_indices_tensor,
             num_prefill_tokens,
-            num_decode_tokens,
             num_prefills,
-            num_decodes,
             num_padded_decodes,
         )
         hidden_states_BC_p = prefill_decode_split.hidden_states_BC_p
@@ -335,9 +333,10 @@ class MambaMixer(MambaBase, CustomOp):
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
                 query_start_loc=query_start_loc_p,
-                current_first_idx=block_idx_first_scheduled_token_p,
-                current_last_idx=block_idx_last_scheduled_token_p,
+                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
+                num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
             )
             # 3. State Space Model sequence transformations.
@@ -407,11 +406,9 @@ class MambaMixer(MambaBase, CustomOp):
                         block_idx_first_scheduled_token:block_idx_last_scheduled_token,
                     ]
 
-                    blocks_to_copy = n_blocks_to_fill[seq_idx].item()
-
                     # Copy the intermediate states to the appropriate cache blocks
                     ssm_state[cache_blocks_to_fill] = intermediate_states[
-                        seq_idx, :blocks_to_copy]
+                        seq_idx, :n_blocks_to_fill]
 
                 # Store the final state from intermediate_states to ssm_state
                 # The kernel stores ALL blocks to intermediate_states at relative positions
