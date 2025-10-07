@@ -247,12 +247,12 @@ class MambaMixer(MambaBase, CustomOp):
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, Mamba1AttentionMetadata)
-            query_start_loc = attn_metadata.query_start_loc
+            query_start_loc_p = attn_metadata.query_start_loc_p
             state_indices_tensor = attn_metadata.state_indices_tensor
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
-            has_initial_states = attn_metadata.has_initial_states
+            has_initial_states_p = attn_metadata.has_initial_states_p
             num_padded_decodes = attn_metadata.num_padded_decodes
 
 
@@ -281,8 +281,6 @@ class MambaMixer(MambaBase, CustomOp):
             hidden_states_BC,
             gate,
             state_indices_tensor,
-            query_start_loc,
-            has_initial_states,
             num_prefill_tokens,
             num_decode_tokens,
             num_prefills,
@@ -295,8 +293,6 @@ class MambaMixer(MambaBase, CustomOp):
         gate_d = prefill_decode_split.gate_d
         state_indices_tensor_p = prefill_decode_split.state_indices_tensor_p
         state_indices_tensor_d = prefill_decode_split.state_indices_tensor_d
-        query_start_loc_p = prefill_decode_split.query_start_loc_p
-        has_initial_states_p = prefill_decode_split.has_initial_states_p
 
         if prefix_caching_enabled:
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
@@ -339,10 +335,9 @@ class MambaMixer(MambaBase, CustomOp):
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
                 query_start_loc=query_start_loc_p,
-                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
-                block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
+                current_first_idx=block_idx_first_scheduled_token_p,
+                current_last_idx=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
-                num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
             )
             # 3. State Space Model sequence transformations.
@@ -386,12 +381,31 @@ class MambaMixer(MambaBase, CustomOp):
             if prefix_caching_enabled:
                 scan_out_p, intermediate_states = scan_result
 
-                n_blocks_to_fill = block_idx_last_scheduled_token_p - current_first_idx_p
+                for seq_idx in range(num_prefills):
+                    # Block index for the first scheduled token
+                    block_idx_first_scheduled_token = block_idx_first_scheduled_token_p[
+                        seq_idx
+                    ]
 
-                for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
+                    # Block index for the last scheduled token
+                    block_idx_last_scheduled_token = block_idx_last_scheduled_token_p[
+                        seq_idx
+                    ]
+
+                    # Number of blocks that need to be written
+                    n_blocks_to_fill = (
+                        block_idx_last_scheduled_token - block_idx_first_scheduled_token
+                    )
+
+                    # Skip sequences that don't have any blocks to fill
+                    if n_blocks_to_fill == 0:
+                        continue
+
+                    # Look up the state indices
                     cache_blocks_to_fill = state_indices_tensor_p[
-                        seq_idx, current_first_idx_p[seq_idx]:
-                        current_first_idx_p[seq_idx] + n_blocks_to_fill[seq_idx]]
+                        seq_idx,
+                        block_idx_first_scheduled_token:block_idx_last_scheduled_token,
+                    ]
 
                     blocks_to_copy = n_blocks_to_fill[seq_idx].item()
 
@@ -401,15 +415,11 @@ class MambaMixer(MambaBase, CustomOp):
 
                 # Store the final state from intermediate_states to ssm_state
                 # The kernel stores ALL blocks to intermediate_states at relative positions
-                for seq_idx in range(num_prefills):
-                    # current_last_idx_p is absolute, but intermediate_states is relative
-                    # The relative index is current_last - current_first
-                    relative_last_idx = current_last_idx_p[seq_idx] - current_first_idx_p[seq_idx]
+                relative_last_indices = block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p
+                batch_indices = torch.arange(num_prefills, device=relative_last_indices.device)
 
-                    # Only store if we have this block in intermediate_states
-                    if relative_last_idx >= 0 and relative_last_idx < intermediate_states.shape[1]:
-                        ssm_state[store_state_indices[seq_idx]] = intermediate_states[
-                            seq_idx, relative_last_idx]
+                # Use advanced indexing to store all final states at once
+                ssm_state[store_state_indices] = intermediate_states[batch_indices, relative_last_indices]
             else:
                 scan_out_p = scan_result
 
@@ -518,20 +528,14 @@ class PrefillDecodeSplit(NamedTuple):
     gate_d: torch.Tensor
     state_indices_tensor_p: torch.Tensor
     state_indices_tensor_d: torch.Tensor
-    query_start_loc_p: Optional[torch.Tensor]
-    has_initial_states_p: Optional[torch.Tensor]
 
 
 def split_batch_to_prefill_and_decode(
     hidden_states_BC: torch.Tensor,
     gate: torch.Tensor,
     state_indices_tensor: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    has_initial_states: Optional[torch.Tensor],
     num_prefill_tokens: int,
-    num_decode_tokens: int,
     num_prefills: int,
-    num_decodes: int,
     num_padded_decodes: int,
 ) -> PrefillDecodeSplit:
     num_actual_tokens = num_prefill_tokens + num_padded_decodes
@@ -552,16 +556,6 @@ def split_batch_to_prefill_and_decode(
         [num_padded_decodes, num_prefills],
         dim=0,
     )
-    query_start_loc_p = (
-        query_start_loc[-num_prefills - 1 :] - num_padded_decodes
-        if num_prefills > 0
-        else None
-    )
-    has_initial_states_p = (
-        has_initial_states[-num_prefills:]
-        if (has_initial_states is not None and num_prefills > 0)
-        else None
-    )
 
     return PrefillDecodeSplit(
         hidden_states_BC_p=hidden_states_BC_p,
@@ -570,8 +564,6 @@ def split_batch_to_prefill_and_decode(
         gate_d=gate_d,
         state_indices_tensor_p=state_indices_tensor_p,
         state_indices_tensor_d=state_indices_tensor_d,
-        query_start_loc_p=query_start_loc_p,
-        has_initial_states_p=has_initial_states_p,
     )
 
 
