@@ -299,20 +299,32 @@ class MambaMixer(MambaBase, CustomOp):
         has_initial_states_p = prefill_decode_split.has_initial_states_p
 
         if prefix_caching_enabled:
-            last_state_idx_d, last_state_idx_p = torch.split(
-                attn_metadata.last_state_idx, [num_decodes, num_prefills],
-                dim=0)
-            current_last_idx_d, current_last_idx_p = torch.split(
-                attn_metadata.current_last_idx, [num_decodes, num_prefills],
-                dim=0)
+            block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
+                torch.split(
+                    attn_metadata.block_idx_last_computed_token,
+                    [num_decodes, num_prefills],
+                    dim=0,
+                )
+            )
+            block_idx_last_scheduled_token_d, block_idx_last_scheduled_token_p = (
+                torch.split(
+                    attn_metadata.block_idx_last_scheduled_token,
+                    [num_decodes, num_prefills],
+                    dim=0,
+                )
+            )
 
-            current_first_idx_p = attn_metadata.current_first_idx_p
-            context_lens_p = attn_metadata.context_lens_p
+            block_idx_first_scheduled_token_p = (
+                attn_metadata.block_idx_first_scheduled_token_p
+            )
+            num_computed_tokens_p = attn_metadata.num_computed_tokens_p
         else:
-            last_state_idx_d, last_state_idx_p = None, None
-            current_last_idx_d, current_last_idx_p = None, None
-            current_first_idx_p = None
-            context_lens_p = None
+            block_idx_last_computed_token_d = None
+            block_idx_last_computed_token_p = None
+            block_idx_last_scheduled_token_d = None
+            block_idx_last_scheduled_token_p = None
+            block_idx_first_scheduled_token_p = None
+            num_computed_tokens_p = None
 
         ssm_outputs = []
 
@@ -327,10 +339,10 @@ class MambaMixer(MambaBase, CustomOp):
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
                 query_start_loc=query_start_loc_p,
-                current_first_idx=current_first_idx_p,
-                current_last_idx=current_last_idx_p,
-                initial_state_idx=last_state_idx_p,
-                context_lens=context_lens_p,
+                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
+                initial_state_idx=block_idx_last_computed_token_p,
+                num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
             )
             # 3. State Space Model sequence transformations.
@@ -344,13 +356,13 @@ class MambaMixer(MambaBase, CustomOp):
             if prefix_caching_enabled:
                 if has_initial_states_p is not None and has_initial_states_p.any():
                     kernel_ssm_indices = state_indices_tensor_p.gather(
-                        1, last_state_idx_p.unsqueeze(1)).squeeze(1)
+                        1, block_idx_last_computed_token_p.unsqueeze(1)).squeeze(1)
                     store_state_indices = state_indices_tensor_p.gather(
-                        1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+                        1, block_idx_last_scheduled_token_p.unsqueeze(1)).squeeze(1)
                 else:
                     # Fresh request: both indices point to current_last_idx
                     kernel_ssm_indices = state_indices_tensor_p.gather(
-                        1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+                        1, block_idx_last_scheduled_token_p.unsqueeze(1)).squeeze(1)
                     store_state_indices = kernel_ssm_indices
 
             scan_result = selective_scan_fn(
@@ -374,7 +386,7 @@ class MambaMixer(MambaBase, CustomOp):
             if prefix_caching_enabled:
                 scan_out_p, intermediate_states = scan_result
 
-                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
+                n_blocks_to_fill = block_idx_last_scheduled_token_p - current_first_idx_p
 
                 for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
                     cache_blocks_to_fill = state_indices_tensor_p[
@@ -406,12 +418,12 @@ class MambaMixer(MambaBase, CustomOp):
 
         if has_decode:
             if prefix_caching_enabled:
-                state_indices_tensor_d_input = \
-                    state_indices_tensor_d.gather(1,
-                        last_state_idx_d.unsqueeze(1)).squeeze(1)
-                state_indices_tensor_d_output = \
-                    state_indices_tensor_d.gather(1,
-                        current_last_idx_d.unsqueeze(1)).squeeze(1)
+                state_indices_tensor_d_input = state_indices_tensor_d.gather(
+                    1, block_idx_last_computed_token_d.unsqueeze(1)
+                ).squeeze(1)
+                state_indices_tensor_d_output = state_indices_tensor_d.gather(
+                    1, block_idx_last_scheduled_token_d.unsqueeze(1)
+                ).squeeze(1)
             else:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
@@ -423,8 +435,8 @@ class MambaMixer(MambaBase, CustomOp):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
-                current_last_idx=current_last_idx_d,
-                initial_state_idx=last_state_idx_d,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
+                initial_state_idx=block_idx_last_computed_token_d,
                 ).transpose(0, 1)
 
             # 3. State Space Model sequence transformation.
@@ -447,7 +459,7 @@ class MambaMixer(MambaBase, CustomOp):
                 time_proj_bias,
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
-                                   dst_state_batch_indices=state_indices_tensor_d_output,
+                dst_state_batch_indices=state_indices_tensor_d_output,
                 out=scan_outputs_d,
             )
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
