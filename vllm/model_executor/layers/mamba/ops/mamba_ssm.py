@@ -377,6 +377,9 @@ def selective_scan_fn(
     pad_slot_id=PAD_SLOT_ID,
     return_intermediate_states=False,
     block_size=256,
+    cache_indices_full=None,
+    block_idx_first_scheduled_token=None,
+    block_idx_last_scheduled_token=None,
 ) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen)
@@ -435,24 +438,12 @@ def selective_scan_fn(
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
-    intermediate_states = None
+    # Calculate max_blocks for cache management
     max_blocks = 0
-    if return_intermediate_states:
-        # Determine dimensions for intermediate states
-        # Shape: (batch_or_cache_lines, num_blocks, dim, dstate)
-        # where num_blocks depends on sequence length and block size
-        batch_size = ssm_states.shape[0]
-        dim_size = A.shape[0]
-        dstate = A.shape[1]
+    if return_intermediate_states and query_start_loc is not None:
         batch_size = query_start_loc.shape[0] - 1
         seqlen = u.shape[1]  # Total length for varlen
         max_blocks = (seqlen + block_size - 1) // block_size
-
-        intermediate_states = torch.zeros(
-            (batch_size, max_blocks, dim_size, dstate),
-            dtype=ssm_states.dtype,
-            device=u.device,
-        )
 
     ops.selective_scan_fwd(
         u,
@@ -469,18 +460,15 @@ def selective_scan_fn(
         has_initial_state,
         ssm_states,
         pad_slot_id,
-        intermediate_states,
         block_size,
         max_blocks,
+        cache_indices_full,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
     )
 
-    if return_intermediate_states:
-        if z is None:
-            return delta, intermediate_states
-        else:
-            return z, intermediate_states
+    # Always return just the output (no intermediate_states to return)
+    if z is None:
+        return delta  # output written inplace to delta
     else:
-        if z is None:
-            return delta  # output written inplace to delta
-        else:
-            return z  # output written inplace to z
+        return z  # output written inplace to z

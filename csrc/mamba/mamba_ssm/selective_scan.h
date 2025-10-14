@@ -68,7 +68,11 @@ struct SSMParamsBase {
     void *__restrict__ query_start_loc_ptr;
     void *__restrict__ cache_indices_ptr;
     void *__restrict__ has_initial_state_ptr;
-    void *__restrict__ intermediate_states_ptr;
+
+    // For direct writing to ssm_states cache
+    void *__restrict__ cache_indices_full_ptr;  // (batch, max_blocks_per_seq) - full mapping
+    void *__restrict__ block_idx_first_scheduled_token_ptr;  // (batch,) - first block to write
+    void *__restrict__ block_idx_last_scheduled_token_ptr;   // (batch,) - last block to write
 
 };
 
