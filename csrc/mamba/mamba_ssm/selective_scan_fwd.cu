@@ -773,7 +773,16 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
         auto cache_indices_ = cache_indices.value();
         TORCH_CHECK(cache_indices_.scalar_type() == at::ScalarType::Int);
         TORCH_CHECK(cache_indices_.is_cuda());
-        CHECK_SHAPE(cache_indices_, batch_size);
+
+        // cache_indices can be either 1D (batch_size,) for non-APC mode
+        // or 2D (batch_size, max_positions) for APC mode
+        const bool is_apc_mode = block_idx_first_scheduled_token.has_value();
+        if (is_apc_mode) {
+            TORCH_CHECK(cache_indices_.dim() == 2, "cache_indices must be 2D for APC mode");
+            TORCH_CHECK(cache_indices_.size(0) == batch_size, "cache_indices first dimension must match batch_size");
+        } else {
+            CHECK_SHAPE(cache_indices_, batch_size);
+        }
     }
    
 
