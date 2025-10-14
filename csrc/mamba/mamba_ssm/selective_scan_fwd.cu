@@ -166,8 +166,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
 
     // Get direct cache writing parameters for APC
-    const int* cache_indices = params.cache_indices_ptr != nullptr ?
-                               reinterpret_cast<const int*>(params.cache_indices_ptr) : nullptr;
     const int* batch_cache_indices = cache_indices != nullptr ?
                                      cache_indices + batch_id * params.cache_indices_stride : nullptr;
     const int* block_idx_first_scheduled = params.block_idx_first_scheduled_token_ptr != nullptr ?
