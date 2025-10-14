@@ -612,10 +612,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! ssm_states,"
       "int pad_slot_id,"
       "int block_size,"
-      "int max_blocks,"
-      "Tensor? cache_indices_full,"
       "Tensor? block_idx_first_scheduled_token,"
-      "Tensor? block_idx_last_scheduled_token) -> ()");
+      "Tensor? block_idx_last_scheduled_token,"
+      "Tensor? initial_state_idx) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
   // Hadamard transforms

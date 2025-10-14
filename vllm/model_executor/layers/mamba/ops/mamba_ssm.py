@@ -377,9 +377,9 @@ def selective_scan_fn(
     pad_slot_id=PAD_SLOT_ID,
     return_intermediate_states=False,
     block_size=256,
-    cache_indices_full=None,
     block_idx_first_scheduled_token=None,
     block_idx_last_scheduled_token=None,
+    initial_state_idx=None,
 ) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen)
@@ -438,13 +438,6 @@ def selective_scan_fn(
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
-    # Calculate max_blocks for cache management
-    max_blocks = 0
-    if return_intermediate_states and query_start_loc is not None:
-        batch_size = query_start_loc.shape[0] - 1
-        seqlen = u.shape[1]  # Total length for varlen
-        max_blocks = (seqlen + block_size - 1) // block_size
-
     ops.selective_scan_fwd(
         u,
         delta,
@@ -461,10 +454,9 @@ def selective_scan_fn(
         ssm_states,
         pad_slot_id,
         block_size,
-        max_blocks,
-        cache_indices_full,
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,
+        initial_state_idx,
     )
 
     # Always return just the output (no intermediate_states to return)

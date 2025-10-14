@@ -369,15 +369,15 @@ class MambaMixer(MambaBase, CustomOp):
                 gate_p,
                 time_proj_bias,
                 delta_softplus=True,
-                cache_indices=kernel_ssm_indices,
+                cache_indices=state_indices_tensor_p,
                 has_initial_state=has_initial_states_p,
                 query_start_loc=query_start_loc_p,
                 return_intermediate_states=prefix_caching_enabled,
                 block_size=mamba_block_size,
-                # NEW: Pass block indices for direct writing to ssm_states
-                cache_indices_full=state_indices_tensor_p if prefix_caching_enabled else None,
-                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p if prefix_caching_enabled else None,
-                block_idx_last_scheduled_token=block_idx_last_scheduled_token_p if prefix_caching_enabled else None,
+                # Pass block indices for direct writing to ssm_states
+                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
+                initial_state_idx=block_idx_last_computed_token_p
             )
 
             ssm_outputs.append(scan_out_p)
