@@ -287,22 +287,46 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 scan_t running_prefix;
                 if (chunk > 0) {
                     running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
+
+                    // Debug: Print running prefix from previous chunk
+                    if (threadIdx.x == 0 && r == 0 && state_idx == 0 && dim_id == 0 && batch_id == 0) {
+                        printf("CHUNK_PREFIX: chunk=%d loaded running_prefix.y from smem=%f\n",
+                               chunk, running_prefix.y);
+                    }
                 } else {
                     // Load initial state
                     if (params.cache_enabled && has_initial_state && batch_cache_indices != nullptr && initial_state_idx != nullptr) {
                         // APC mode: load initial state from cache
                         int init_pos = initial_state_idx[batch_id];
                         int cache_slot = batch_cache_indices[init_pos];
+                        // Note: ssm_states is already offset by dim_id in APC mode, don't double-count
                         int state_offset = cache_slot * params.ssm_states_batch_stride +
-                                         (dim_id * kNRows + r) * params.ssm_states_dim_stride +
+                                         r * params.ssm_states_dim_stride +
                                          state_idx * params.ssm_states_dstate_stride;
                         running_prefix = make_float2(1.0, float(ssm_states[state_offset]));
+
+                        // Debug: Print initial state loading
+                        if (threadIdx.x == 0 && r == 0 && state_idx == 0 && dim_id == 0 && batch_id == 0) {
+                            printf("LOAD_INIT: chunk=%d init_pos=%d cache_slot=%d state_val=%f running_prefix.y=%f\n",
+                                   chunk, init_pos, cache_slot, float(ssm_states[state_offset]), running_prefix.y);
+                        }
                     } else if (has_initial_state) {
                         // Non-APC mode: load from current batch position
                         running_prefix = make_float2(1.0, float(ssm_states[state_idx * params.ssm_states_dstate_stride]));
+
+                        // Debug: Print initial state loading
+                        if (threadIdx.x == 0 && r == 0 && state_idx == 0 && dim_id == 0) {
+                            printf("LOAD_INIT_NONAPC: chunk=%d state_val=%f\n",
+                                   chunk, float(ssm_states[state_idx * params.ssm_states_dstate_stride]));
+                        }
                     } else {
                         // No initial state
                         running_prefix = make_float2(1.0, 0.0);
+
+                        // Debug: Print no initial state
+                        if (threadIdx.x == 0 && r == 0 && state_idx == 0 && dim_id == 0) {
+                            printf("NO_INIT: chunk=%d running_prefix.y=%f\n", chunk, 0.0f);
+                        }
                     }
                 }
 
@@ -342,6 +366,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                         }
 
                         // Check if this thread processes this token boundary
+                        // The inclusive scan ensures thread_data contains accumulated states from the beginning
                         if (token_boundary >= thread_start_token &&
                             token_boundary < thread_end_token &&
                             token_boundary < chunk_start_pos + chunk_seqlen) {
@@ -352,10 +377,24 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                 // Get cache slot from batch_cache_indices
                                 int cache_slot = batch_cache_indices[pos];
 
+                                // Debug: Check if we're writing to slot 0
+                                if (cache_slot == 0 && threadIdx.x == 63 && r == 0 && state_idx == 0 && dim_id == 0) {
+                                    printf("WARNING: Writing to cache slot 0! pos=%d, token_boundary=%d, first_idx=%d, last_idx=%d\n",
+                                           pos, token_boundary, first_idx, last_idx);
+                                }
+
                                 // Write state to cache
+                                // Note: ssm_states is already offset by dim_id in APC mode, don't double-count
                                 int state_offset = cache_slot * params.ssm_states_batch_stride +
-                                                 (dim_id * kNRows + r) * params.ssm_states_dim_stride +
+                                                 r * params.ssm_states_dim_stride +
                                                  state_idx * params.ssm_states_dstate_stride;
+
+                                // Debug: Print state value being stored
+                                if ((threadIdx.x == 63 || threadIdx.x == 127) && r == 0 && state_idx == 0 && dim_id == 0) {
+                                    printf("STORE_INTER: thread=%d chunk=%d pos=%d token=%d cache_slot=%d state_val=%f\n",
+                                           threadIdx.x, chunk, pos, token_boundary, cache_slot, thread_data[local_idx].y);
+                                }
+
                                 ssm_states[state_offset] = typename Ktraits::state_t(thread_data[local_idx].y);
                             }
                         }
@@ -366,6 +405,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 if (threadIdx.x == 0) {
                     smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
 
+                    // Debug: Print what we're storing to shared memory for next chunk
+                    if (r == 0 && state_idx == 0 && dim_id == 0 && batch_id == 0) {
+                        printf("CHUNK_STORE_SMEM: chunk=%d storing running_prefix.y to smem=%f\n",
+                               chunk, prefix_op.running_prefix.y);
+                    }
+
                     // Store final state to ssm_states
                     if (chunk == n_chunks - 1) {  // Last chunk
                         if (params.cache_enabled && batch_cache_indices != nullptr && block_idx_last_scheduled != nullptr) {
@@ -373,9 +418,23 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                             int final_pos = block_idx_last_scheduled[batch_id];
                             int cache_slot = batch_cache_indices[final_pos];
 
+                            // Debug: Check if we're writing to slot 0
+                            if (cache_slot == 0 && r == 0 && state_idx == 0 && dim_id == 0) {
+                                printf("WARNING: Final state writing to cache slot 0! final_pos=%d, cache_slot=%d\n",
+                                       final_pos, cache_slot);
+                            }
+
+                            // Note: ssm_states is already offset by dim_id in APC mode, don't double-count
                             int state_offset = cache_slot * params.ssm_states_batch_stride +
-                                             (dim_id * kNRows + r) * params.ssm_states_dim_stride +
+                                             r * params.ssm_states_dim_stride +
                                              state_idx * params.ssm_states_dstate_stride;
+
+                            // Debug: Print final state value
+                            if (r == 0 && state_idx == 0 && dim_id == 0) {
+                                printf("STORE_FINAL: chunk=%d final_pos=%d cache_slot=%d state_val=%f\n",
+                                       chunk, final_pos, cache_slot, prefix_op.running_prefix.y);
+                            }
+
                             ssm_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                         } else if (!params.cache_enabled) {
                             // Non-cached mode: store directly at current batch position
