@@ -137,9 +137,19 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + sequence_start_index * params.C_batch_stride + group_id * params.C_group_stride;
 
-    typename Ktraits::state_t *ssm_states = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
-        cache_index * params.ssm_states_batch_stride +
-        dim_id * kNRows * params.ssm_states_dim_stride;
+    // For APC mode, we don't offset ssm_states by cache_index since we'll use absolute cache slots
+    // For non-APC mode, we still use cache_index as before
+    typename Ktraits::state_t *ssm_states;
+    if (params.cache_enabled) {
+        // APC mode: ssm_states points to the base, we'll use absolute cache slots later
+        ssm_states = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
+            dim_id * kNRows * params.ssm_states_dim_stride;
+    } else {
+        // Non-APC mode: offset by cache_index as before
+        ssm_states = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
+            cache_index * params.ssm_states_batch_stride +
+            dim_id * kNRows * params.ssm_states_dim_stride;
+    }
     
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
@@ -166,8 +176,11 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
 
     // Get direct cache writing parameters for APC
-    const int* batch_cache_indices = cache_indices != nullptr ?
-                                     cache_indices + batch_id * params.cache_indices_stride : nullptr;
+    // Note: We need to get cache_indices_ptr fresh from params for APC mode, not reuse the old cache_indices variable
+    const int* cache_indices_apc = params.cache_indices_ptr != nullptr ?
+                                   reinterpret_cast<const int*>(params.cache_indices_ptr) : nullptr;
+    const int* batch_cache_indices = cache_indices_apc != nullptr ?
+                                     cache_indices_apc + batch_id * params.cache_indices_stride : nullptr;
     const int* block_idx_first_scheduled = params.block_idx_first_scheduled_token_ptr != nullptr ?
                                            reinterpret_cast<const int*>(params.block_idx_first_scheduled_token_ptr) : nullptr;
     const int* block_idx_last_scheduled = params.block_idx_last_scheduled_token_ptr != nullptr ?
