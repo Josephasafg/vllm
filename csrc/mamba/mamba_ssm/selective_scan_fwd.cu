@@ -201,11 +201,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            input_t *u_ptr = u + r * params.u_d_stride;
-            input_t *delta_ptr = delta + r * params.delta_d_stride;
-            load_input<Ktraits>(u_ptr, u_vals[r], smem_load, seqlen - chunk * chunk_size);
+            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, seqlen - chunk * chunk_size);
             if constexpr (!kDirectIO) { __syncthreads(); }
-            load_input<Ktraits>(delta_ptr, delta_vals_load[r], smem_load, seqlen - chunk * chunk_size);
+            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, seqlen - chunk * chunk_size);
         }
         u += chunk_size;
         delta += chunk_size;
@@ -278,8 +276,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                                  !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
 
                     if (seqlen % (kNItems * kNThreads) != 0) {  // So that the last state is correct
-                        int chunk_remaining = seqlen - chunk * chunk_size;
-                        if (threadIdx.x * kNItems + i >= chunk_remaining) {
+                        if (threadIdx.x * kNItems + i >= seqlen - chunk * chunk_size) {
                             thread_data[i] = make_float2(1.f, 0.f);
                         }
                     }
@@ -314,14 +311,18 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 );
                 // There's a syncthreads in the scan op, so we don't need to sync here.
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
-
                 if (threadIdx.x == 0) {
                     smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
 
                     // Store state at the end of each chunk when cache is enabled
                     if (params.cache_enabled && batch_cache_indices != nullptr) {
                         // Get the cache slot for this chunk
-                        int cache_slot = batch_cache_indices[chunk];
+                        int cache_slot;
+                        if (chunk == n_chunks - 1) {
+                            cache_slot = batch_cache_indices[block_idx_last_scheduled[batch_id]];
+                        } else {
+                            cache_slot = batch_cache_indices[block_idx_first_scheduled[batch_id] + chunk];
+                        }
 
                         // Note: ssm_states is already offset by dim_id in APC mode, don't double-count
                         int state_offset = cache_slot * params.ssm_states_batch_stride +
