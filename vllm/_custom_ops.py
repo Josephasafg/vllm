@@ -1723,9 +1723,9 @@ def selective_scan_fwd(
     ssm_states: torch.Tensor,
     pad_slot_id: int,
     block_size: int = 1024,
-    block_idx_first_scheduled_token: Optional[torch.Tensor] = None,
-    block_idx_last_scheduled_token: Optional[torch.Tensor] = None,
-    initial_state_idx: Optional[torch.Tensor] = None,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
 ):
     torch.ops._C.selective_scan_fwd(
         u,

@@ -117,12 +117,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
         : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
 
-    // Single index for both loading and storing
     const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
-
     const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id]; 
-
     // cache_index == params.pad_slot_id is defined as padding, so we exit early
     if (cache_index == params.pad_slot_id){
         return;
