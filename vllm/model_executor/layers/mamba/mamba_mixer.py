@@ -344,31 +344,6 @@ class MambaMixer(MambaBase, CustomOp):
             )
             time_proj_bias = self._time_proj_bias()
 
-            # APC parameters - load initial state from last computed block
-            kernel_ssm_indices = state_indices_tensor_p
-            if prefix_caching_enabled:
-                if has_initial_states_p is not None and has_initial_states_p.any():
-                    # Load initial state from the last computed block
-                    kernel_ssm_indices = state_indices_tensor_p.gather(
-                        1, block_idx_last_computed_token_p.unsqueeze(1)
-                    ).squeeze(1)
-                    store_state_indices = state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
-                    ).squeeze(1)
-                else:
-                    # Fresh request: use last scheduled block for initial state
-                    kernel_ssm_indices = state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
-                    ).squeeze(1)
-                    store_state_indices = kernel_ssm_indices
-
-            DEBUG = False and self.prefix in ('model.layers.0.mixer', 'model.layers.1.mixer', 'model.layers.14.mixer', 'model.layers.15.mixer')
-            if DEBUG:
-                print("---------------------------------------------------------")
-                print(f"Layer: {self.prefix}")
-                print(f"INTERMEDIATE STATE to load from {ssm_state[kernel_ssm_indices].sum():.20f}")
-                print(f"SSM BEFORE KERNEL {ssm_state[store_state_indices].sum():.20f}")
-
             scan_out_p = selective_scan_fn(
                 conv_out_p,
                 ssm_state,
@@ -390,50 +365,6 @@ class MambaMixer(MambaBase, CustomOp):
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p
             )
-
-            if prefix_caching_enabled:
-
-                for seq_idx in range(num_prefills):
-                    # Block index for the first scheduled token
-                    block_idx_first_scheduled_token = block_idx_first_scheduled_token_p[
-                        seq_idx
-                    ]
-
-                    # Block index for the last scheduled token
-                    block_idx_last_scheduled_token = block_idx_last_scheduled_token_p[
-                        seq_idx
-                    ]
-
-                    # Number of blocks that need to be written
-                    n_blocks_to_fill = (
-                        block_idx_last_scheduled_token - block_idx_first_scheduled_token
-                    )
-
-                    # Skip sequences that don't have any blocks to fill
-                    if n_blocks_to_fill == 0:
-                        continue
-
-                    # Look up the state indices
-                    cache_blocks_to_fill = state_indices_tensor_p[
-                        seq_idx,
-                        block_idx_first_scheduled_token:block_idx_last_scheduled_token,
-                    ]
-
-                    if DEBUG:
-                        print(f"INTERMEDIATE STATE to load from {ssm_state[state_indices_tensor_p[seq_idx, n_blocks_to_fill-1]].sum():.20f}")
-
-                # Store the final state from intermediate_states to ssm_state
-                # The kernel stores ALL blocks to intermediate_states at relative positions
-                if prefix_caching_enabled:
-                    relative_last_indices = (
-                        block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p
-                    )
-                    batch_indices = torch.arange(
-                        num_prefills, device=relative_last_indices.device
-                    )
-
-            if DEBUG:
-                print(f"SSM AFTER KERNEL {ssm_state[store_state_indices].sum():.20f}")
 
             ssm_outputs.append(scan_out_p)
 

@@ -413,7 +413,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             if base_chunk_size is None:
                 # TODO(Josephasafg) Choose a more generic value
                 #  for the block size
-                attn_block_size = 1024 * cdiv(attn_tokens_per_mamba_state, 1024)
+                attn_block_size = 2048 * cdiv(attn_tokens_per_mamba_state, 2048)
             else:
                 chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
                 attn_block_size = chunk_size * cdiv(

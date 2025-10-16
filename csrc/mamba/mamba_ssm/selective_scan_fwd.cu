@@ -121,7 +121,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
 
-    const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
+    const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id]; 
 
     // cache_index == params.pad_slot_id is defined as padding, so we exit early
     if (cache_index == params.pad_slot_id){
@@ -177,12 +177,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int chunk_size = (params.cache_enabled && params.block_size > 0) ? params.block_size : 2048;
     const int n_chunks = (seqlen + chunk_size - 1) / chunk_size;
 
-    // Get direct cache writing parameters for APC
-    // Note: We need to get cache_indices_ptr fresh from params for APC mode, not reuse the old cache_indices variable
-    const int* cache_indices_apc = params.cache_indices_ptr != nullptr ?
-                                   reinterpret_cast<const int*>(params.cache_indices_ptr) : nullptr;
-    const int* batch_cache_indices = cache_indices_apc != nullptr ?
-                                     cache_indices_apc + batch_id * params.cache_indices_stride : nullptr;
+    const int* batch_cache_indices = cache_indices != nullptr ?
+                                     cache_indices + batch_id * params.cache_indices_stride : nullptr;
     const int* block_idx_first_scheduled = params.block_idx_first_scheduled_token_ptr != nullptr ?
                                            reinterpret_cast<const int*>(params.block_idx_first_scheduled_token_ptr) : nullptr;
     const int* block_idx_last_scheduled = params.block_idx_last_scheduled_token_ptr != nullptr ?
@@ -190,6 +186,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int* initial_state_idx = params.initial_state_idx_ptr != nullptr ?
                                    reinterpret_cast<const int*>(params.initial_state_idx_ptr) : nullptr;
 
+    const int load_cache_slot = batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         const int chunk_start_pos = chunk * chunk_size;
@@ -288,11 +285,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 } else {
                     // Load initial state
                     if (params.cache_enabled && has_initial_state && batch_cache_indices != nullptr && initial_state_idx != nullptr) {
-                        // APC mode: load initial state from cache
-                        int init_pos = initial_state_idx[batch_id];
-                        int cache_slot = batch_cache_indices[init_pos];
-                        // Note: ssm_states is already offset by dim_id in APC mode, don't double-count
-                        int state_offset = cache_slot * params.ssm_states_batch_stride +
+                        int state_offset = load_cache_slot * params.ssm_states_batch_stride +
                                          r * params.ssm_states_dim_stride +
                                          state_idx * params.ssm_states_dstate_stride;
                         running_prefix = make_float2(1.0, float(ssm_states[state_offset]));

@@ -103,7 +103,7 @@ class Mamba1AttentionMetadataBuilder(
             state_indices_tensor = common_attn_metadata.block_table_tensor
             mamba_block_size = self.kv_cache_spec.block_size
             num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(
-                self.device
+                self.device, non_blocking=True
             )
             # Block index of the last computed token
             block_idx_last_computed_token = (
@@ -151,9 +151,6 @@ class Mamba1AttentionMetadataBuilder(
                 ]
 
         elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs:
-            self.state_indices_tensor[:num_decodes].copy_(
-                state_indices_tensor, non_blocking=True
-            )
             padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
