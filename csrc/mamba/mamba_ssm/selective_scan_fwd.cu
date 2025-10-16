@@ -183,7 +183,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int* initial_state_idx = params.initial_state_idx_ptr != nullptr ?
                                    reinterpret_cast<const int*>(params.initial_state_idx_ptr) : nullptr;
 
-    const int load_cache_slot = batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
+    const int load_cache_slot = params.cache_enabled && batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         const int chunk_start_pos = chunk * chunk_size;
