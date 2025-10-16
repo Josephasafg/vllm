@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -29,7 +28,7 @@ class Mamba1AttentionMetadata:
     query_start_loc_p: torch.Tensor
     state_indices_tensor: torch.Tensor
     seq_lens: torch.Tensor
-    has_initial_states_p: Optional[torch.Tensor]
+    has_initial_states_p: torch.Tensor | None
     num_prefills: int
     num_prefill_tokens: int
     num_decodes: int
