@@ -406,7 +406,9 @@ template<typename input_t, typename weight_t, typename state_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
 
     #ifndef USE_ROCM
-        if (params.seqlen <= 128) {           
+        if (params.cache_enabled && params.block_size == 1024) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream); // Forces kChunkSize = 1024
+        } else if (params.seqlen <= 128) {
             selective_scan_fwd_launch<32, 4, input_t, weight_t, state_t>(params, stream);
         } else if (params.seqlen <= 256) {
             selective_scan_fwd_launch<32, 8, input_t, weight_t, state_t>(params, stream);
@@ -418,7 +420,9 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
             selective_scan_fwd_launch<128, 16, input_t, weight_t, state_t>(params, stream);
         }
     #else
-        if (params.seqlen <= 256) {
+        if (params.cache_enabled && params.block_size == 1024) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream); // Forces kChunkSize = 1024
+        } else if (params.seqlen <= 256) {
             selective_scan_fwd_launch<64, 4, input_t, weight_t, state_t>(params, stream);
         } else if (params.seqlen <= 512) {
             selective_scan_fwd_launch<64, 8, input_t, weight_t, state_t>(params, stream);
