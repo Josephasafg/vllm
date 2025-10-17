@@ -96,28 +96,56 @@ class Mamba1AttentionMetadataBuilder(
         num_computed_tokens, num_computed_tokens_p = None, None
         block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
+        block_idx_first_scheduled_token_cpu = None
+        block_idx_last_computed_token_cpu = None
+        block_idx_last_scheduled_token_cpu = None
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
             mamba_block_size = self.kv_cache_spec.block_size
-            num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(
-                self.device
+            num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu
+
+            # Compute block indices on CPU to avoid launching tiny GPU kernels.
+            block_idx_last_computed_token_cpu = torch.div(
+                num_computed_tokens_cpu + (mamba_block_size - 1),
+                mamba_block_size,
+                rounding_mode="floor",
+            ) - 1
+            block_idx_last_computed_token_cpu.clamp_(min=0)
+
+            block_idx_first_scheduled_token_cpu = torch.div(
+                num_computed_tokens_cpu + mamba_block_size,
+                mamba_block_size,
+                rounding_mode="floor",
+            ) - 1
+
+            
+            block_idx_last_scheduled_token_cpu = torch.div(
+                common_attn_metadata.seq_lens_cpu + (mamba_block_size - 1),
+                mamba_block_size,
+                rounding_mode="floor",
+            ) - 1
+            block_idx_last_scheduled_token_cpu.clamp_(min=0)
+
+            max_block_idx_available = max(state_indices_tensor.size(-1) - 1, 0)
+            block_idx_last_computed_token_cpu.clamp_(max=max_block_idx_available)
+            block_idx_first_scheduled_token_cpu.clamp_(max=max_block_idx_available)
+            block_idx_last_scheduled_token_cpu.clamp_(max=max_block_idx_available)
+
+            num_computed_tokens = num_computed_tokens_cpu.to(
+                self.device, non_blocking=True
             )
-            # Block index of the last computed token
-            block_idx_last_computed_token = (
-                cdiv(num_computed_tokens, mamba_block_size) - 1
+            idx_dtype = self.block_idx_last_scheduled_token.dtype
+            block_idx_last_computed_token = block_idx_last_computed_token_cpu.to(
+                self.device, dtype=idx_dtype, non_blocking=True
             )
-            # which is <= block index for the first scheduled token
-            block_idx_first_scheduled_token = (
-                cdiv(num_computed_tokens + 1, mamba_block_size) - 1
+            block_idx_first_scheduled_token = block_idx_first_scheduled_token_cpu.to(
+                self.device, dtype=idx_dtype, non_blocking=True
             )
-            # which is <= block index of the last scheduled token
-            block_idx_last_scheduled_token = (
-                cdiv(common_attn_metadata.seq_lens, mamba_block_size) - 1
+            block_idx_last_scheduled_token = block_idx_last_scheduled_token_cpu.to(
+                self.device, dtype=idx_dtype, non_blocking=True
             )
-            # -1 in case it's non-computed and causes later issues with indexing
-            block_idx_last_computed_token = block_idx_last_computed_token.clamp(min=0)
         else:
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
@@ -149,7 +177,11 @@ class Mamba1AttentionMetadataBuilder(
                     num_reqs - num_prefills : num_reqs
                 ]
 
-        elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs and self.compilation_config.full_cuda_graph:
+        elif (
+            num_decodes > 0
+            and num_decodes <= self.decode_cudagraph_max_bs
+            and self.compilation_config.full_cuda_graph
+        ):
             padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
