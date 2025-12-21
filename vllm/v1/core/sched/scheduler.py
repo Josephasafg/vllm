@@ -289,11 +289,6 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
             )
 
-            # Ensure even chunk boundary for Mamba1 alignment
-            total_after = request.num_computed_tokens + num_new_tokens
-            if total_after % 2 != 0 and num_new_tokens > 1:
-                num_new_tokens -= 1
-
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             external_load_encoder_input: list[int] = []
@@ -556,11 +551,6 @@ class Scheduler(SchedulerInterface):
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
-
-                    # Ensure even chunk boundary for Mamba1 alignment
-                    total_after = num_computed_tokens + num_new_tokens
-                    if total_after % 2 != 0 and num_new_tokens > 1:
-                        num_new_tokens -= 1
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:

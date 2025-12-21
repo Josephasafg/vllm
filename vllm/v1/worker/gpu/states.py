@@ -143,6 +143,13 @@ class RequestState:
         assert prefill_len >= prompt_len, (
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
+
+        # Pad prefill tokens to even length for Mamba1 chunked prefill alignment.
+        # Prepend a padding token (0) if the length is odd.
+        if prefill_len % 2 != 0:
+            prefill_token_ids = [0] + list(prefill_token_ids)
+            prefill_len += 1
+
         self.prefill_len.np[req_idx] = prefill_len
         self.prefill_token_ids.np[req_idx, :prefill_len] = prefill_token_ids
 
