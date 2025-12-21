@@ -143,7 +143,6 @@ class RequestState:
         assert prefill_len >= prompt_len, (
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
-
         self.prefill_len.np[req_idx] = prefill_len
         self.prefill_token_ids.np[req_idx, :prefill_len] = prefill_token_ids
 

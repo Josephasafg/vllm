@@ -114,6 +114,13 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         sequence_start_index = query_start_loc[batch_id];
         seqlen = query_start_loc[batch_id + 1] - sequence_start_index;
     }
+    // Pad seqlen to even for Mamba1 quality fix.
+    // Odd sequence lengths cause quality degradation during chunked prefill.
+    // The kernel handles positions beyond actual seqlen with identity values.
+    const int actual_seqlen = seqlen;
+    if (seqlen % 2 != 0) {
+        seqlen += 1;
+    }
     const bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
         : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
 
@@ -193,9 +200,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, seqlen - chunk * kChunkSize);
+            // Use actual_seqlen for loading to avoid reading beyond actual data
+            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, actual_seqlen - chunk * kChunkSize);
             if constexpr (!kDirectIO) { __syncthreads(); }
-            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, seqlen - chunk * kChunkSize);
+            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, actual_seqlen - chunk * kChunkSize);
         }
         u += kChunkSize;
         delta += kChunkSize;
@@ -231,8 +239,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             weight_t BC_val[kNRows];
             weight_t B_vals[kNItems], C_vals[kNItems];
             if constexpr (kIsVariableB) {
+                // Use actual_seqlen for loading to avoid reading beyond actual data
                 load_weight<Ktraits>(Bvar + state_idx * params.B_dstate_stride, B_vals,
-                    smem_load_weight, (seqlen - chunk * kChunkSize) * (1));
+                    smem_load_weight, (actual_seqlen - chunk * kChunkSize) * (1));
                 if constexpr (!kIsVariableC) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -242,8 +251,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             }
             if constexpr (kIsVariableC) {
                 auto &smem_load_weight_C = !kIsVariableB ? smem_load_weight : smem_load_weight1;
+                // Use actual_seqlen for loading to avoid reading beyond actual data
                 load_weight<Ktraits>(Cvar + state_idx * params.C_dstate_stride, C_vals,
-                    smem_load_weight_C, (seqlen - chunk * kChunkSize) * (1));
+                    smem_load_weight_C, (actual_seqlen - chunk * kChunkSize) * (1));
                 if constexpr (!kIsVariableB) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -338,7 +348,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
+            // Use actual_seqlen for storing to avoid writing beyond actual data
+            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, actual_seqlen - chunk * kChunkSize);
         }
 
         if constexpr (kHasZ) {
@@ -350,14 +361,15 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             for (int r = 0; r < kNRows; ++r) {
                 input_t z_vals[kNItems];
                 __syncthreads();
-                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, seqlen - chunk * kChunkSize);
+                // Use actual_seqlen for loading/storing z to avoid reading/writing beyond actual data
+                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, actual_seqlen - chunk * kChunkSize);
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     float z_val = z_vals[i];
                     out_vals[r][i] *= z_val / (1 + expf(-z_val));
                 }
                 __syncthreads();
-                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
+                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, actual_seqlen - chunk * kChunkSize);
             }
         }
 
