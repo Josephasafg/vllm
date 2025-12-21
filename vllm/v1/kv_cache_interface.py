@@ -249,6 +249,15 @@ class MambaSpec(KVCacheSpec):
     num_speculative_blocks: int = 0
 
     @property
+    def prefill_alignment(self) -> int:
+        """Alignment requirement for prefill chunk boundaries.
+
+        Mamba1 requires even alignment to avoid quality degradation
+        during chunked prefill.
+        """
+        return 2 if self.mamba_type == "mamba1" else 1
+
+    @property
     def page_size_bytes(self) -> int:
         page_size = sum(
             prod(shape) * get_dtype_size(dtype)

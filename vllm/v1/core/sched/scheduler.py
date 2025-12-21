@@ -42,7 +42,7 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     PrefixCacheStats,
@@ -141,6 +141,14 @@ class Scheduler(SchedulerInterface):
         self.block_size = block_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+
+        # Prefill alignment for Mamba1 models (requires even chunk boundaries).
+        self.prefill_alignment = 1
+        for group in kv_cache_config.kv_cache_groups:
+            spec = group.kv_cache_spec
+            if isinstance(spec, MambaSpec) and spec.prefill_alignment > 1:
+                self.prefill_alignment = spec.prefill_alignment
+                break
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -288,6 +296,16 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
             )
+
+            # Apply prefill alignment for Mamba1 models.
+            # Ensure chunk boundaries land on aligned positions.
+            if self.prefill_alignment > 1:
+                total_after = request.num_computed_tokens + num_new_tokens
+                is_final_chunk = total_after >= request.num_tokens
+                if not is_final_chunk:
+                    remainder = total_after % self.prefill_alignment
+                    if remainder != 0 and num_new_tokens > remainder:
+                        num_new_tokens -= remainder
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -551,6 +569,16 @@ class Scheduler(SchedulerInterface):
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
+
+                    # Apply prefill alignment for Mamba1 models.
+                    # Ensure chunk boundaries land on aligned positions.
+                    if self.prefill_alignment > 1:
+                        total_after = num_computed_tokens + num_new_tokens
+                        is_final_chunk = total_after >= request.num_tokens
+                        if not is_final_chunk:
+                            remainder = total_after % self.prefill_alignment
+                            if remainder != 0 and num_new_tokens > remainder:
+                                num_new_tokens -= remainder
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
