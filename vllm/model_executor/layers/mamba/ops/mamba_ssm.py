@@ -468,6 +468,15 @@ def selective_state_update(
         )
 
 
+def _pad_tensor_seqlen(t: torch.Tensor, pad_amount: int) -> torch.Tensor:
+    """Pad tensor along the sequence length dimension (last dim) by appending zeros."""
+    if pad_amount == 0:
+        return t
+    # Pad last dim: (left, right) = (0, pad_amount) to append zeros
+    pad = (0, pad_amount)
+    return torch.nn.functional.pad(t, pad, value=0)
+
+
 def selective_scan_fn(
     u,
     ssm_states,
@@ -559,6 +568,27 @@ def selective_scan_fn(
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
+    # Mamba1 chunked prefill alignment fix: pad to even length if needed.
+    # The kernel has issues when processing odd-length sequences.
+    seqlen = u.shape[-1]
+    needs_padding = seqlen % 2 != 0
+    original_delta = delta
+    original_z = z
+
+    if needs_padding:
+        # Pad all input tensors by appending one zero
+        u = _pad_tensor_seqlen(u, 1)
+        delta = _pad_tensor_seqlen(delta, 1)
+        B = _pad_tensor_seqlen(B, 1)
+        C = _pad_tensor_seqlen(C, 1)
+        if z is not None:
+            z = _pad_tensor_seqlen(z, 1)
+        # Adjust query_start_loc: increase the last entry to include padding
+        # The padding token belongs to the last sequence
+        if query_start_loc is not None:
+            query_start_loc = query_start_loc.clone()
+            query_start_loc[-1] = query_start_loc[-1] + 1
+
     ops.selective_scan_fwd(
         u,
         delta,
@@ -579,6 +609,17 @@ def selective_scan_fn(
         block_idx_last_scheduled_token,
         initial_state_idx,
     )
+
+    # If padding was applied, copy results back to original buffers
+    if needs_padding:
+        if z is None:
+            # Output is in delta, copy back excluding the padding (last element)
+            original_delta.copy_(delta[..., :-1])
+            return original_delta
+        else:
+            # Output is in z, copy back excluding the padding (last element)
+            original_z.copy_(z[..., :-1])
+            return original_z
 
     if z is None:
         return delta  # output written inplace to delta
