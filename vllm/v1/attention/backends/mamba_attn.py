@@ -20,6 +20,11 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
+# Default chunk alignment for Mamba1 models that don't have explicit chunk_size.
+# This alignment is needed for proper state handling during chunked prefill.
+# Mamba2 models will override this with their model config chunk_size.
+DEFAULT_MAMBA_CHUNK_ALIGNMENT = 8
+
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
@@ -49,6 +54,17 @@ class BaseMambaAttentionMetadata:
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
 
+    # Chunk alignment fields for proper state handling during chunked prefill.
+    # These ensure state is saved/loaded at consistent chunk boundaries.
+    chunk_size: int = 0
+    prep_initial_states: bool = False
+    # cu_chunk_seqlen_p: cumulative chunk sequence lengths (nchunks+1,)
+    # seq_idx_p: sequence index for each logical chunk (nchunks,)
+    # last_chunk_indices_p: index of last chunk for each sequence (batch,)
+    cu_chunk_seqlen_p: torch.Tensor | None = None
+    seq_idx_p: torch.Tensor | None = None
+    last_chunk_indices_p: torch.Tensor | None = None
+
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     metadata_cls: type[M]
@@ -72,6 +88,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.compilation_config.max_cudagraph_capture_size,
+        )
+
+        # Get chunk_size from model config if available (Mamba2), otherwise use
+        # default alignment (Mamba1). Subclasses can override this.
+        model_chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        self.chunk_size = (
+            model_chunk_size
+            if model_chunk_size is not None
+            else DEFAULT_MAMBA_CHUNK_ALIGNMENT
         )
 
         if self.vllm_config.cache_config.enable_prefix_caching:
@@ -162,6 +187,74 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             block_idx_last_scheduled_token,
         )
 
+    def _compute_chunk_metadata(
+        self,
+        num_prefills: int,
+        num_computed_tokens_p_cpu: torch.Tensor,
+        query_start_loc_p_cpu: torch.Tensor,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """
+        Compute chunk-aligned metadata for Mamba models.
+
+        This method constructs chunks such that:
+        1. Chunks contain tokens from a *single* sequence only.
+        2. For every sequence, we can retrieve the mamba state every
+           chunk_size tokens, which is critical for proper state handling
+           during chunked prefill.
+
+        The chunking handles the interaction between num_computed_tokens
+        (which may not be chunk-aligned due to chunked prefill) and the
+        new tokens being processed.
+
+        Returns:
+            cu_chunk_seqlen: Cumulative chunk sequence lengths (nchunks+1,)
+            seq_idx: Sequence index for each logical chunk (nchunks,)
+            last_chunk_indices: Index of last chunk for each sequence (batch,)
+        """
+        cu_chunk_seqlen: list[int] = []
+        seq_idx: list[int] = []
+        last_chunk_indices: list[int] = []
+        seqlen_pos = 0
+        chunk_size = self.chunk_size
+
+        for req_idx in range(num_prefills):
+            this_num_computed = int(num_computed_tokens_p_cpu[req_idx].item())
+            this_new_tokens = int(
+                query_start_loc_p_cpu[req_idx + 1].item()
+                - query_start_loc_p_cpu[req_idx].item()
+            )
+
+            # If computed tokens are not chunk-aligned, use the first
+            # chunk to finish it off (bring total to chunk boundary)
+            if this_num_computed % chunk_size != 0:
+                seq_idx.append(req_idx)
+                cu_chunk_seqlen.append(seqlen_pos)
+                # How many tokens to finish the chunk?
+                chunk_len = (
+                    cdiv(this_num_computed, chunk_size) * chunk_size
+                    - this_num_computed
+                )
+                # We can only use at most this_new_tokens
+                chunk_len = min(chunk_len, this_new_tokens)
+                seqlen_pos += chunk_len
+                this_new_tokens -= chunk_len
+
+            # Process remaining tokens in full chunks
+            n_chunks = cdiv(this_new_tokens, chunk_size)
+            for _ in range(n_chunks):
+                seq_idx.append(req_idx)
+                cu_chunk_seqlen.append(seqlen_pos)
+                chunk_len = min(chunk_size, this_new_tokens)
+                seqlen_pos += chunk_len
+                this_new_tokens -= chunk_len
+
+            assert this_new_tokens == 0
+            last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
+
+        cu_chunk_seqlen.append(seqlen_pos)
+
+        return cu_chunk_seqlen, seq_idx, last_chunk_indices
+
     def _compute_common_metadata(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -191,6 +284,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+
+        # for chunk alignment (needed for chunked prefill)
+        prep_initial_states = False
+        cu_chunk_seqlen_p = None
+        seq_idx_p = None
+        last_chunk_indices_p = None
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
@@ -230,11 +329,42 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 compute_causal_conv1d_metadata(query_start_loc_p)
             )
 
+            # Always compute num_computed_tokens_p for prefills (needed for
+            # chunk alignment even without prefix caching)
+            num_computed_tokens_p_cpu = common_attn_metadata.num_computed_tokens_cpu[
+                num_reqs - num_prefills : num_reqs
+            ]
+            num_computed_tokens_p = num_computed_tokens_p_cpu.to(self.device)
+
+            # Compute chunk-aligned metadata for proper state handling
+            query_start_loc_p_cpu = (
+                common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+                - num_decode_tokens
+            )
+            cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
+                num_prefills, num_computed_tokens_p_cpu, query_start_loc_p_cpu
+            )
+            cu_chunk_seqlen_p = torch.as_tensor(
+                cu_chunk_seqlen,
+                device=common_attn_metadata.query_start_loc.device,
+                dtype=torch.int32,
+            )
+            seq_idx_p = torch.as_tensor(
+                seq_idx,
+                device=common_attn_metadata.query_start_loc.device,
+                dtype=torch.int32,
+            )
+            last_chunk_indices_p = torch.as_tensor(
+                last_chunk_indices,
+                device=common_attn_metadata.query_start_loc.device,
+                dtype=torch.int32,
+            )
+
+            # prep_initial_states indicates whether any prefill request has
+            # initial states to load (continuation from previous chunk)
+            prep_initial_states = bool(torch.any(has_initial_states_cpu).item())
+
             if self.vllm_config.cache_config.enable_prefix_caching:
-                assert num_computed_tokens is not None
-                num_computed_tokens_p = num_computed_tokens[
-                    num_reqs - num_prefills : num_reqs
-                ]
                 assert block_idx_first_scheduled_token is not None
                 block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
                     num_reqs - num_prefills : num_reqs
@@ -280,6 +410,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            # chunk alignment fields
+            chunk_size=self.chunk_size,
+            prep_initial_states=prep_initial_states,
+            cu_chunk_seqlen_p=cu_chunk_seqlen_p,
+            seq_idx_p=seq_idx_p,
+            last_chunk_indices_p=last_chunk_indices_p,
         )
 
     def update_block_table(
