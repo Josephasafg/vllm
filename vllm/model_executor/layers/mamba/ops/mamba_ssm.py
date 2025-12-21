@@ -487,6 +487,10 @@ def selective_scan_fn(
     block_idx_first_scheduled_token=None,
     block_idx_last_scheduled_token=None,
     initial_state_idx=None,
+    # Chunk alignment metadata for proper SSM state computation
+    cu_chunk_seqlen=None,
+    seq_idx=None,
+    chunk_size=None,
 ) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen)
@@ -534,6 +538,14 @@ def selective_scan_fn(
     initial_state_idx: (batch,), dtype int32
         The pointer into cache_indices, where the cache block
         containing the initial state is located.
+    cu_chunk_seqlen: (n_chunks+1,), dtype int32
+        Cumulative chunk lengths for variable-length chunk processing.
+        Used for proper chunk alignment when resuming from prefix cache.
+        cu_chunk_seqlen[i] to cu_chunk_seqlen[i+1] defines chunk i boundaries.
+    seq_idx: (n_chunks,), dtype int32
+        Sequence index for each logical chunk.
+    chunk_size: int
+        The chunk size used for alignment (typically mamba_block_size).
     returns
         output: (dim, total_length) for varlen or (batch, dim, seqlen)
                 supports inplace replacement
@@ -578,6 +590,9 @@ def selective_scan_fn(
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,
         initial_state_idx,
+        cu_chunk_seqlen,
+        seq_idx,
+        chunk_size if chunk_size is not None else 0,
     )
 
     if z is None:

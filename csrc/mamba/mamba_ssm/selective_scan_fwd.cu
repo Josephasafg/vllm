@@ -169,8 +169,11 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
     constexpr int kChunkSize = kNThreads * kNItems;
 
-    // Use block_size for chunking when APC is enabled, otherwise use 2048 for backwards compatibility
-    const int iteration_chunk_size = params.cache_enabled ? params.block_size : 2048;
+    // Use block_size for chunking when APC is enabled, chunk_size when chunk metadata is provided,
+    // otherwise use 2048 for backwards compatibility
+    const int iteration_chunk_size = params.cache_enabled ? params.block_size
+                                   : (params.cu_chunk_seqlen_ptr != nullptr && params.chunk_size > 0) ? params.chunk_size
+                                   : 2048;
     const int n_chunks = (seqlen + iteration_chunk_size - 1) / iteration_chunk_size;
 
     const int* batch_cache_indices = cache_indices != nullptr ?
@@ -181,6 +184,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                           reinterpret_cast<const int*>(params.block_idx_last_scheduled_token_ptr) : nullptr;
     const int* initial_state_idx = params.initial_state_idx_ptr != nullptr ?
                                    reinterpret_cast<const int*>(params.initial_state_idx_ptr) : nullptr;
+
+    // Chunk alignment metadata
+    const int* cu_chunk_seqlen = params.cu_chunk_seqlen_ptr != nullptr ?
+                                  reinterpret_cast<const int*>(params.cu_chunk_seqlen_ptr) : nullptr;
+    const int* seq_idx = params.seq_idx_ptr != nullptr ?
+                         reinterpret_cast<const int*>(params.seq_idx_ptr) : nullptr;
 
     const size_t load_cache_slot = params.cache_enabled && batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
 
@@ -506,7 +515,10 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         int64_t block_size,
                         const std::optional<torch::Tensor> &block_idx_first_scheduled_token,
                         const std::optional<torch::Tensor> &block_idx_last_scheduled_token,
-                        const std::optional<torch::Tensor> &initial_state_idx) {
+                        const std::optional<torch::Tensor> &initial_state_idx,
+                        const std::optional<torch::Tensor> &cu_chunk_seqlen,
+                        const std::optional<torch::Tensor> &seq_idx,
+                        int64_t chunk_size) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -548,6 +560,12 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.block_idx_first_scheduled_token_ptr = block_idx_first_scheduled_token.has_value() ? block_idx_first_scheduled_token.value().data_ptr() : nullptr;
     params.block_idx_last_scheduled_token_ptr = block_idx_last_scheduled_token.has_value() ? block_idx_last_scheduled_token.value().data_ptr() : nullptr;
     params.initial_state_idx_ptr = initial_state_idx.has_value() ? initial_state_idx.value().data_ptr() : nullptr;
+
+    // Set chunk alignment metadata
+    params.cu_chunk_seqlen_ptr = cu_chunk_seqlen.has_value() ? cu_chunk_seqlen.value().data_ptr() : nullptr;
+    params.seq_idx_ptr = seq_idx.has_value() ? seq_idx.value().data_ptr() : nullptr;
+    params.n_chunks_total = cu_chunk_seqlen.has_value() ? static_cast<int>(cu_chunk_seqlen.value().size(0) - 1) : 0;
+    params.chunk_size = static_cast<int>(chunk_size);
 
     // All stride are in elements, not bytes.
     params.A_d_stride = A.stride(0);
@@ -633,7 +651,10 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   int64_t block_size,
                   const std::optional<torch::Tensor> &block_idx_first_scheduled_token,
                   const std::optional<torch::Tensor> &block_idx_last_scheduled_token,
-                  const std::optional<torch::Tensor> &initial_state_idx) {
+                  const std::optional<torch::Tensor> &initial_state_idx,
+                  const std::optional<torch::Tensor> &cu_chunk_seqlen,
+                  const std::optional<torch::Tensor> &seq_idx,
+                  int64_t chunk_size) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -778,7 +799,10 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        block_size,
                        block_idx_first_scheduled_token,
                        block_idx_last_scheduled_token,
-                       initial_state_idx
+                       initial_state_idx,
+                       cu_chunk_seqlen,
+                       seq_idx,
+                       chunk_size
                        );
 
     

@@ -335,6 +335,7 @@ class MambaMixer(MambaBase, CustomOp):
                 initial_state_idx=block_idx_last_computed_token_p,
                 num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
+                metadata=attn_metadata,
             )
             # 3. State Space Model sequence transformations.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
@@ -361,6 +362,10 @@ class MambaMixer(MambaBase, CustomOp):
                 block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
+                # Chunk alignment metadata for proper SSM state computation
+                cu_chunk_seqlen=attn_metadata.cu_chunk_seqlen_p,
+                seq_idx=attn_metadata.seq_idx_p,
+                chunk_size=attn_metadata.chunk_size,
             )
             ssm_outputs.append(scan_out_p)
 

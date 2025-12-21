@@ -357,7 +357,10 @@ void selective_scan_fwd(
     const torch::Tensor& ssm_states, int64_t pad_slot_id, int64_t block_size,
     const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
     const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
-    const std::optional<torch::Tensor>& initial_state_idx);
+    const std::optional<torch::Tensor>& initial_state_idx,
+    const std::optional<torch::Tensor>& cu_chunk_seqlen,
+    const std::optional<torch::Tensor>& seq_idx,
+    int64_t chunk_size);
 
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,

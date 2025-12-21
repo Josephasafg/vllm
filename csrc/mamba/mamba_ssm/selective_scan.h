@@ -72,6 +72,13 @@ struct SSMParamsBase {
     void *__restrict__ block_idx_first_scheduled_token_ptr;  // (batch,) - first block to write
     void *__restrict__ block_idx_last_scheduled_token_ptr;   // (batch,) - last block to write
     void *__restrict__ initial_state_idx_ptr;  // (batch,) - index of the initial state to use
+
+    // Chunk alignment metadata for proper SSM state computation when resuming
+    // from prefix cache or chunked prefill
+    void *__restrict__ cu_chunk_seqlen_ptr;  // (n_chunks_total+1,) - cumulative chunk lengths
+    void *__restrict__ seq_idx_ptr;          // (n_chunks_total,) - sequence index per chunk
+    int n_chunks_total;  // Total number of logical chunks across all sequences
+    int chunk_size;      // The chunk size used for alignment
 };
 
 
