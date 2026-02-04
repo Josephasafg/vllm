@@ -528,11 +528,26 @@ def split_decodes_and_prefills(
     # Real prefill batches have large query_lens, so they won't match this.
     all_new_requests = torch.all(is_new_request | (query_lens == 0))
     if all_new_requests and max_query_len <= decode_threshold:
+        # DEBUG: Log when CUDA graph capture detection triggers
+        logger.warning(
+            "[MAMBA_DEBUG] all_new_requests triggered! "
+            "num_reqs=%d, max_query_len=%d, decode_threshold=%d, "
+            "query_lens=%s, seq_lens=%s, is_new_request (before zero)=%s. "
+            "Zeroing out is_new_request - potential misclassification!",
+            num_reqs, max_query_len, decode_threshold,
+            query_lens.tolist(), seq_lens.tolist(), is_new_request.tolist()
+        )
         is_new_request = torch.zeros_like(is_new_request)
 
     if max_query_len <= decode_threshold and (
         not require_uniform or decode_threshold <= 1
     ) and not torch.any(is_new_request):
+        # DEBUG: Log all-decode classification
+        logger.info(
+            "[MAMBA_DEBUG] All decode: num_reqs=%d, num_tokens=%d, "
+            "max_query_len=%d, seq_lens=%s",
+            num_reqs, num_tokens, max_query_len, seq_lens.tolist()
+        )
         return num_reqs, 0, num_tokens, 0
     if query_lens[0].item() > decode_threshold or is_new_request[0].item():
         # first request is not decode, so no decode requests
