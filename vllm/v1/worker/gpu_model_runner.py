@@ -1469,6 +1469,9 @@ class GPUModelRunner(
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
 
+        # DEBUG: Force sync to test race condition theory for Mamba repetition bug
+        torch.cuda.synchronize()
+
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
@@ -3527,6 +3530,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                req_ids=self.input_batch.req_ids,  # DEBUG: for Mamba state debugging
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,

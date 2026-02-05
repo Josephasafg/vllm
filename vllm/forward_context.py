@@ -252,6 +252,9 @@ class ForwardContext:
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
+    # DEBUG: Request IDs for debugging Mamba state issues
+    req_ids: list[str] | None = None
+
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
@@ -285,6 +288,7 @@ def create_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
+    req_ids: list[str] | None = None,  # DEBUG: for Mamba state debugging
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         if vllm_config.speculative_config is None:
@@ -311,6 +315,7 @@ def create_forward_context(
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
+        req_ids=req_ids,
     )
 
 
@@ -341,6 +346,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    req_ids: list[str] | None = None,  # DEBUG: for Mamba state debugging
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -403,6 +409,7 @@ def set_forward_context(
         slot_mapping,
         additional_kwargs,
         skip_compiled,
+        req_ids,
     )
 
     try:
