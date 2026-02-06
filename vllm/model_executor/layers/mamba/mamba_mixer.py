@@ -411,11 +411,6 @@ class MambaMixer(MambaBase, CustomOp):
             # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
             scan_outputs_d = torch.empty_like(hidden_states_BC_d.transpose(0, 1))
 
-            # DEBUG: Capture state before kernel to check if it changes
-            # ssm_state shape: [num_slots, dim, dstate] = [256, 1536, 16]
-            _debug_indices = state_indices_tensor_d_output[:min(4, len(state_indices_tensor_d_output))]
-            _debug_state_before = ssm_state[_debug_indices, :4, :4].clone()
-
             selective_state_update(
                 ssm_state,
                 conv_out_d.transpose(0, 1),
@@ -431,24 +426,6 @@ class MambaMixer(MambaBase, CustomOp):
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=scan_outputs_d,
             )
-
-            # DEBUG: Check if state changed after kernel
-            _debug_state_after = ssm_state[_debug_indices, :4, :4].clone()
-            _debug_diff = (_debug_state_after - _debug_state_before).abs().max().item()
-            # Log if change is suspiciously small (state should change meaningfully each step)
-            if _debug_diff < 1e-3:
-                # Get req_ids from forward context for debugging
-                _debug_req_ids = forward_context.req_ids
-                _debug_req_ids_subset = _debug_req_ids[:min(4, len(_debug_req_ids))] if _debug_req_ids else None
-                logger.warning(
-                    "[MAMBA_DEBUG] SSM state change very small! "
-                    "req_ids=%s, indices=%s, max_diff=%.2e, before=%s, after=%s",
-                    _debug_req_ids_subset,
-                    _debug_indices.tolist(),
-                    _debug_diff,
-                    _debug_state_before[0, 0, :2].tolist(),
-                    _debug_state_after[0, 0, :2].tolist()
-                )
 
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
