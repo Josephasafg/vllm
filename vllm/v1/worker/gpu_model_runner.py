@@ -1592,6 +1592,13 @@ class GPUModelRunner(
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
+        # In async scheduling, resolve -1 placeholder tokens in token_ids_cpu
+        # with real sampled tokens before preparing input IDs. This ensures
+        # that if a request falls back to token_ids_cpu (e.g., due to being
+        # excluded from prev_req_id_to_index), it has correct token values.
+        if self.use_async_scheduling:
+            self.input_batch.resolve_async_token_placeholders()
+
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
             scheduler_output,

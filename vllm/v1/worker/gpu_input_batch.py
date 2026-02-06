@@ -933,6 +933,41 @@ class InputBatch:
             self.sampled_token_ids_cpu = None
             self.async_copy_ready_event = None
 
+    def resolve_async_token_placeholders(self) -> None:
+        """
+        In async scheduling case, replace -1 placeholder tokens in token_ids_cpu
+        with real sampled tokens from the previous iteration.
+
+        This must be called BEFORE _prepare_input_ids to ensure that if a request
+        falls back to token_ids_cpu (e.g., due to being excluded from
+        prev_req_id_to_index after a KV load failure), it has the correct token
+        value instead of the -1 placeholder.
+        """
+        if self.sampled_token_ids_cpu is None or self.prev_req_id_to_index is None:
+            # Not async scheduling or no previous mapping.
+            return
+
+        # Synchronize to ensure async copy is complete.
+        if self.async_copy_ready_event is not None:
+            self.async_copy_ready_event.synchronize()
+
+        sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+        for index, req_id in enumerate(self.req_ids):
+            prev_index = self.prev_req_id_to_index.get(req_id)
+            if prev_index is None:
+                continue
+
+            new_ids: list[int] = sampled_token_ids[prev_index]
+            if not new_ids:
+                continue
+            num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
+
+            # Update token_ids_cpu with the real sampled token.
+            if num_sampled_ids > 0:
+                token_pos = self.num_tokens_no_spec[index] - num_sampled_ids
+                self.token_ids_cpu[index, token_pos:token_pos + num_sampled_ids] = \
+                    new_ids[:num_sampled_ids]
+
     def update_async_output_token_ids(self) -> None:
         """
         In async scheduling case, update output_token_ids in sampling metadata
