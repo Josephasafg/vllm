@@ -4,7 +4,6 @@
 import functools
 import gc
 import itertools
-import logging
 import threading
 import time
 from collections import defaultdict
@@ -885,9 +884,11 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
-            # [REPETITION_BUG] Clean up debug history
+            # [REPETITION_BUG] Clean up debug state
             if hasattr(self, "_debug_token_history"):
                 self._debug_token_history.pop(req_id, None)
+            if hasattr(self, "_debug_logged_reqs"):
+                self._debug_logged_reqs.discard(req_id)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1120,22 +1121,6 @@ class GPUModelRunner(
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
-
-        # [REPETITION_BUG] Check for block collisions across requests
-        if logger.isEnabledFor(logging.DEBUG):
-            all_blocks: set[int] = set()
-            for req_id in self.input_batch.req_ids:
-                req_state = self.requests.get(req_id)
-                if req_state and req_state.block_ids:
-                    for block_list in req_state.block_ids:
-                        for block_id in block_list:
-                            if block_id in all_blocks:
-                                logger.warning(
-                                    "[REPETITION_BUG] BLOCK_COLLISION block=%d req=%s",
-                                    block_id,
-                                    req_id,
-                                )
-                            all_blocks.add(block_id)
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
@@ -1618,34 +1603,6 @@ class GPUModelRunner(
             total_num_scheduled_tokens,
             cu_num_tokens,
         )
-
-        # [REPETITION_BUG] Log a sample of input_ids and positions for debugging
-        if logger.isEnabledFor(logging.DEBUG):
-            for i in range(min(3, num_reqs)):  # Log first 3 requests
-                req_id = self.input_batch.req_ids[i]
-                seq_len = self.seq_lens.np[i]
-                num_computed = self.input_batch.num_computed_tokens_cpu[i]
-                num_sched = num_scheduled_tokens[i]
-                # Tokens that will be INPUT to the model this step
-                # (at positions num_computed to num_computed + num_sched)
-                input_tokens = self.input_batch.token_ids_cpu[
-                    i, num_computed : num_computed + num_sched
-                ]
-                # Also show the few tokens before (context)
-                context_start = max(0, num_computed - 3)
-                context_tokens = self.input_batch.token_ids_cpu[
-                    i, context_start:num_computed
-                ]
-                logger.debug(
-                    "[REPETITION_BUG] INPUT req=%s num_computed=%d num_sched=%d "
-                    "seq_len=%d context_tokens=%s input_tokens=%s",
-                    req_id,
-                    num_computed,
-                    num_sched,
-                    seq_len,
-                    context_tokens.tolist(),
-                    input_tokens.tolist(),
-                )
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2997,12 +2954,6 @@ class GPUModelRunner(
             if self.input_batch.prev_sampled_token_ids is None:
                 assert sampled_token_ids.shape[-1] == 1
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
-                logger.info(
-                    "[REPETITION_BUG] INIT prev_sampled_token_ids, "
-                    "same_tensor=%s data_ptr=%s",
-                    self.input_batch.prev_sampled_token_ids is sampled_token_ids,
-                    sampled_token_ids.data_ptr(),
-                )
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
@@ -3047,36 +2998,25 @@ class GPUModelRunner(
             if self.use_async_scheduling and len(sampled_ids) == 1:
                 # Check GPU tensor for actual token if available
                 if self.input_batch.prev_sampled_token_ids is None:
-                    logger.warning(
-                        "[REPETITION_BUG] prev_sampled_token_ids is None for req=%s",
-                        req_id,
-                    )
                     continue
-                # NOTE: In async non-spec mode, prev_sampled_token_ids might
-                # reference the current sampled_token_ids tensor (same object)
-                # so reading from it gives current step's tokens
                 gpu_token = self.input_batch.prev_sampled_token_ids[
                     req_idx, 0
                 ].item()
                 # Track last N tokens for this request to detect repetition
                 if not hasattr(self, "_debug_token_history"):
                     self._debug_token_history: dict[str, list[int]] = {}
+                if not hasattr(self, "_debug_logged_reqs"):
+                    self._debug_logged_reqs: set[str] = set()
+                # Skip if already logged for this request
+                if req_id in self._debug_logged_reqs:
+                    continue
                 history = self._debug_token_history.setdefault(req_id, [])
                 history.append(gpu_token)
                 if len(history) > 50:
                     history.pop(0)
-                # Periodic log every 50 tokens to confirm detection is running
-                total_tokens = len(req_state.output_token_ids)
-                if total_tokens > 0 and total_tokens % 50 == 0:
-                    logger.info(
-                        "[REPETITION_BUG] TRACKING req=%s total_out=%d "
-                        "last_10_gpu=%s",
-                        req_id[:16],
-                        total_tokens,
-                        history[-10:] if len(history) >= 10 else history,
-                    )
-                # Detect various repetition patterns
+                # Detect various repetition patterns (only log once per request)
                 if len(history) >= 6:
+                    detected = False
                     # Check for 2-token pattern repeated 3x (like "word" + " ")
                     p2 = tuple(history[-2:])
                     p2_prev = tuple(history[-4:-2])
@@ -3085,12 +3025,13 @@ class GPUModelRunner(
                         self._log_repetition_debug(
                             req_id, req_idx, -998, history  # -998 = 2-token pattern
                         )
+                        detected = True
                     # Check for same token 6x in a row
-                    last_6 = history[-6:]
-                    if len(set(last_6)) == 1:
+                    elif len(set(history[-6:])) == 1:
                         self._log_repetition_debug(
-                            req_id, req_idx, last_6[0], history
+                            req_id, req_idx, history[-1], history
                         )
+                        detected = True
                     # Check for low diversity (same 2 tokens dominate last 10)
                     elif len(history) >= 10:
                         from collections import Counter
@@ -3100,6 +3041,9 @@ class GPUModelRunner(
                             self._log_repetition_debug(
                                 req_id, req_idx, -997, history  # -997 = low diversity
                             )
+                            detected = True
+                    if detected:
+                        self._debug_logged_reqs.add(req_id)
             elif not self.use_async_scheduling and len(req_state.output_token_ids) >= 10:
                 last_10 = req_state.output_token_ids[-10:]
                 if len(set(last_10)) == 1 and last_10[0] != -1:
