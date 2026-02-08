@@ -3133,15 +3133,51 @@ class GPUModelRunner(
                 if shared:
                     block_collisions.append((other_req_id[:16], list(shared)[:5]))
 
+        # Get block table row for this request (from GPU buffer)
+        block_table_row = None
+        try:
+            bt = self.input_batch.block_table[0]  # First KV cache group
+            num_blocks_in_table = bt.num_blocks_per_row[req_idx]
+            block_table_row = bt.block_table.np[req_idx, :min(num_blocks_in_table, 10)].tolist()
+        except Exception:
+            pass
+
+        # Get seq_lens if available
+        seq_len_value = None
+        try:
+            if hasattr(self, 'seq_lens') and self.seq_lens is not None:
+                seq_len_value = self.seq_lens.np[req_idx]
+        except Exception:
+            pass
+
+        # Check if any other request has the same block_table_row (excluding shared prefix)
+        block_table_duplicates = []
+        if block_table_row and len(block_table_row) > 1:
+            # Check non-prefix blocks (skip first block which may be shared)
+            my_non_prefix_blocks = set(block_table_row[1:])
+            for other_idx, other_req_id in enumerate(self.input_batch.req_ids):
+                if other_req_id == req_id:
+                    continue
+                try:
+                    other_bt = self.input_batch.block_table[0]
+                    other_num_blocks = other_bt.num_blocks_per_row[other_idx]
+                    other_blocks = set(other_bt.block_table.np[other_idx, 1:min(other_num_blocks, 10)].tolist())
+                    overlap = my_non_prefix_blocks & other_blocks
+                    if overlap:
+                        block_table_duplicates.append((other_req_id[:16], list(overlap)[:3]))
+                except Exception:
+                    pass
+
         logger.warning(
             "[REPETITION_BUG] DETECTED req_id=%s req_idx=%d "
             "repeated_token=%d "
             "num_computed=%d num_computed_cpu=%d num_tokens=%d "
             "num_tokens_no_spec=%d num_prompt=%d "
             "num_blocks=%d all_blocks=%s "
+            "block_table_row=%s seq_len=%s "
             "num_output_tokens=%d "
             "token_history=%s nearby_gpu_tokens=%s "
-            "block_collisions=%s",
+            "block_collisions=%s non_prefix_duplicates=%s",
             req_id,
             req_idx,
             repeated_token,
@@ -3152,10 +3188,13 @@ class GPUModelRunner(
             num_prompt,
             len(all_block_ids),
             all_block_ids[:10],  # First 10 blocks
+            block_table_row,
+            seq_len_value,
             len(req_state.output_token_ids),
             token_history[-15:],  # Last 15 tokens
             nearby_gpu_tokens,
             block_collisions[:5] if block_collisions else None,
+            block_table_duplicates[:3] if block_table_duplicates else None,
         )
 
     @contextmanager
