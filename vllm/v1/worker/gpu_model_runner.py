@@ -3044,10 +3044,43 @@ class GPUModelRunner(
                             detected = True
                     if detected:
                         self._debug_logged_reqs.add(req_id)
-            elif not self.use_async_scheduling and len(req_state.output_token_ids) >= 10:
-                last_10 = req_state.output_token_ids[-10:]
-                if len(set(last_10)) == 1 and last_10[0] != -1:
-                    self._log_repetition_debug(req_id, req_idx, last_10[0], last_10)
+            elif not self.use_async_scheduling:
+                # Sync scheduling - check output_token_ids directly
+                output_ids = req_state.output_token_ids
+                if len(output_ids) >= 6:
+                    # Track for rate limiting
+                    if not hasattr(self, "_debug_logged_reqs"):
+                        self._debug_logged_reqs: set[str] = set()
+                    if req_id in self._debug_logged_reqs:
+                        continue
+                    detected = False
+                    # Check for 2-token pattern repeated 3x
+                    p2 = tuple(output_ids[-2:])
+                    p2_prev = tuple(output_ids[-4:-2])
+                    p2_prev2 = tuple(output_ids[-6:-4])
+                    if p2 == p2_prev == p2_prev2 and p2[0] != -1:
+                        self._log_repetition_debug(
+                            req_id, req_idx, -998, list(output_ids[-15:])
+                        )
+                        detected = True
+                    # Check for same token 6x in a row
+                    elif len(set(output_ids[-6:])) == 1 and output_ids[-1] != -1:
+                        self._log_repetition_debug(
+                            req_id, req_idx, output_ids[-1], list(output_ids[-15:])
+                        )
+                        detected = True
+                    # Check for low diversity
+                    elif len(output_ids) >= 10:
+                        from collections import Counter
+                        counts = Counter(output_ids[-10:])
+                        top = counts.most_common(1)
+                        if top and top[0][1] >= 8 and top[0][0] != -1:
+                            self._log_repetition_debug(
+                                req_id, req_idx, -997, list(output_ids[-15:])
+                            )
+                            detected = True
+                    if detected:
+                        self._debug_logged_reqs.add(req_id)
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
