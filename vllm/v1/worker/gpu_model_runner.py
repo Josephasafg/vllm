@@ -3042,6 +3042,20 @@ class GPUModelRunner(
                             detected = True
                     if detected:
                         self._debug_logged_reqs.add(req_id)
+                        # Also log if we have logits available from last forward
+                        if hasattr(self, 'execute_model_state') and self.execute_model_state is not None:
+                            try:
+                                logits = self.execute_model_state.logits
+                                if logits is not None:
+                                    # Get top-5 logits for this request
+                                    req_logits = logits[req_idx]
+                                    top5_vals, top5_ids = torch.topk(req_logits, 5)
+                                    logger.warning(
+                                        "[REPETITION_BUG] LOGITS req_id=%s top5_ids=%s top5_vals=%s",
+                                        req_id[:16], top5_ids.tolist(), top5_vals.tolist()
+                                    )
+                            except Exception as e:
+                                logger.warning("[REPETITION_BUG] Failed to get logits: %s", e)
             elif not self.use_async_scheduling:
                 # Sync scheduling - check output_token_ids directly
                 output_ids = req_state.output_token_ids
@@ -3144,9 +3158,16 @@ class GPUModelRunner(
 
         # Get seq_lens if available
         seq_len_value = None
+        query_start_loc_value = None
         try:
             if hasattr(self, 'seq_lens') and self.seq_lens is not None:
                 seq_len_value = self.seq_lens.np[req_idx]
+            if hasattr(self, 'query_start_loc') and self.query_start_loc is not None:
+                # Get query_start_loc for this request and neighbors
+                num_reqs = self.input_batch.num_reqs
+                start_idx = max(0, req_idx)
+                end_idx = min(req_idx + 3, num_reqs + 1)
+                query_start_loc_value = self.query_start_loc.np[start_idx:end_idx].tolist()
         except Exception:
             pass
 
@@ -3174,7 +3195,7 @@ class GPUModelRunner(
             "num_computed=%d num_computed_cpu=%d num_tokens=%d "
             "num_tokens_no_spec=%d num_prompt=%d "
             "num_blocks=%d all_blocks=%s "
-            "block_table_row=%s seq_len=%s "
+            "block_table_row=%s seq_len=%s query_start_loc=%s "
             "num_output_tokens=%d "
             "token_history=%s nearby_gpu_tokens=%s "
             "block_collisions=%s non_prefix_duplicates=%s",
@@ -3190,6 +3211,7 @@ class GPUModelRunner(
             all_block_ids[:10],  # First 10 blocks
             block_table_row,
             seq_len_value,
+            query_start_loc_value,
             len(req_state.output_token_ids),
             token_history[-15:],  # Last 15 tokens
             nearby_gpu_tokens,
