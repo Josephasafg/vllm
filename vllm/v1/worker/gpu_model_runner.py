@@ -885,6 +885,9 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            # [REPETITION_BUG] Clean up debug history
+            if hasattr(self, "_debug_token_history"):
+                self._debug_token_history.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -3034,10 +3037,41 @@ class GPUModelRunner(
             req_state.output_token_ids.extend(sampled_ids)
 
             # [REPETITION_BUG] Detect token repetition for debugging
-            if len(req_state.output_token_ids) >= 10:
+            # In async mode, check the actual sampled token from GPU
+            if self.use_async_scheduling and len(sampled_ids) == 1:
+                actual_token = sampled_ids[0]  # This is -1 placeholder
+                # Check GPU tensor for actual token if available
+                if self.input_batch.prev_sampled_token_ids is not None:
+                    gpu_token = self.input_batch.prev_sampled_token_ids[
+                        req_idx, 0
+                    ].item()
+                    # Track last N tokens for this request to detect repetition
+                    if not hasattr(self, "_debug_token_history"):
+                        self._debug_token_history: dict[str, list[int]] = {}
+                    history = self._debug_token_history.setdefault(req_id, [])
+                    history.append(gpu_token)
+                    if len(history) > 20:
+                        history.pop(0)
+                    # Detect repeated pattern (same token 10x or repeated 3-token pattern)
+                    if len(history) >= 10:
+                        last_10 = history[-10:]
+                        if len(set(last_10)) == 1:
+                            self._log_repetition_debug(
+                                req_id, req_idx, last_10[0], history
+                            )
+                        # Also check for repeated 3-token pattern
+                        elif len(history) >= 12:
+                            pattern = tuple(history[-3:])
+                            prev_pattern = tuple(history[-6:-3])
+                            prev_prev = tuple(history[-9:-6])
+                            if pattern == prev_pattern == prev_prev:
+                                self._log_repetition_debug(
+                                    req_id, req_idx, -999, history  # -999 = pattern
+                                )
+            elif not self.use_async_scheduling and len(req_state.output_token_ids) >= 10:
                 last_10 = req_state.output_token_ids[-10:]
-                if len(set(last_10)) == 1:
-                    self._log_repetition_debug(req_id, req_idx, last_10[0])
+                if len(set(last_10)) == 1 and last_10[0] != -1:
+                    self._log_repetition_debug(req_id, req_idx, last_10[0], last_10)
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
@@ -3056,7 +3090,7 @@ class GPUModelRunner(
         )
 
     def _log_repetition_debug(
-        self, req_id: str, req_idx: int, repeated_token: int
+        self, req_id: str, req_idx: int, repeated_token: int, token_history: list[int]
     ) -> None:
         """Log comprehensive debug info when repetition is detected."""
         req_state = self.requests[req_id]
@@ -3069,34 +3103,34 @@ class GPUModelRunner(
         num_tokens = req_state.num_tokens
         num_tokens_no_spec = self.input_batch.num_tokens_no_spec[req_idx]
         num_prompt = self.input_batch.num_prompt_tokens[req_idx]
+        num_computed_cpu = self.input_batch.num_computed_tokens_cpu[req_idx]
 
-        # Get the last few tokens that were written to token_ids_cpu
-        # This shows what tokens are actually in the buffer
-        last_5_pos = max(0, num_tokens_no_spec - 5)
-        last_tokens_in_buffer = self.input_batch.token_ids_cpu[
-            req_idx, last_5_pos:num_tokens_no_spec
-        ].tolist()
-
-        # Get the last few output_token_ids for comparison
-        last_5_output = req_state.output_token_ids[-5:]
+        # Get what's in prev_sampled_token_ids for nearby requests
+        nearby_gpu_tokens = []
+        if self.input_batch.prev_sampled_token_ids is not None:
+            for i in range(max(0, req_idx - 2), min(req_idx + 3, self.input_batch.num_reqs)):
+                tok = self.input_batch.prev_sampled_token_ids[i, 0].item()
+                nearby_gpu_tokens.append((i, self.input_batch.req_ids[i][:8], tok))
 
         logger.warning(
             "[REPETITION_BUG] DETECTED req_id=%s req_idx=%d "
             "repeated_token=%d "
-            "num_computed=%d num_tokens=%d num_tokens_no_spec=%d num_prompt=%d "
+            "num_computed=%d num_computed_cpu=%d num_tokens=%d "
+            "num_tokens_no_spec=%d num_prompt=%d "
             "block_ids=%s num_output_tokens=%d "
-            "last_tokens_in_buffer=%s last_output_ids=%s",
+            "token_history=%s nearby_gpu_tokens=%s",
             req_id,
             req_idx,
             repeated_token,
             num_computed,
+            num_computed_cpu,
             num_tokens,
             num_tokens_no_spec,
             num_prompt,
             block_ids[0][:3] if block_ids else None,  # First 3 blocks
             len(req_state.output_token_ids),
-            last_tokens_in_buffer,
-            last_5_output,
+            token_history[-15:],  # Last 15 tokens
+            nearby_gpu_tokens,
         )
 
     @contextmanager
