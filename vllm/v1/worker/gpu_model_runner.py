@@ -3088,13 +3088,31 @@ class GPUModelRunner(
                 tok = self.input_batch.prev_sampled_token_ids[i, 0].item()
                 nearby_gpu_tokens.append((i, self.input_batch.req_ids[i][:8], tok))
 
+        # Get ALL block IDs for this request
+        all_block_ids = block_ids[0] if block_ids else []
+
+        # Check for block collisions with other requests
+        block_collisions = []
+        my_blocks = set(all_block_ids)
+        for other_req_id in self.input_batch.req_ids:
+            if other_req_id == req_id:
+                continue
+            other_state = self.requests.get(other_req_id)
+            if other_state and other_state.block_ids:
+                other_blocks = set(other_state.block_ids[0])
+                shared = my_blocks & other_blocks
+                if shared:
+                    block_collisions.append((other_req_id[:16], list(shared)[:5]))
+
         logger.warning(
             "[REPETITION_BUG] DETECTED req_id=%s req_idx=%d "
             "repeated_token=%d "
             "num_computed=%d num_computed_cpu=%d num_tokens=%d "
             "num_tokens_no_spec=%d num_prompt=%d "
-            "block_ids=%s num_output_tokens=%d "
-            "token_history=%s nearby_gpu_tokens=%s",
+            "num_blocks=%d all_blocks=%s "
+            "num_output_tokens=%d "
+            "token_history=%s nearby_gpu_tokens=%s "
+            "block_collisions=%s",
             req_id,
             req_idx,
             repeated_token,
@@ -3103,10 +3121,12 @@ class GPUModelRunner(
             num_tokens,
             num_tokens_no_spec,
             num_prompt,
-            block_ids[0][:3] if block_ids else None,  # First 3 blocks
+            len(all_block_ids),
+            all_block_ids[:10],  # First 10 blocks
             len(req_state.output_token_ids),
             token_history[-15:],  # Last 15 tokens
             nearby_gpu_tokens,
+            block_collisions[:5] if block_collisions else None,
         )
 
     @contextmanager
