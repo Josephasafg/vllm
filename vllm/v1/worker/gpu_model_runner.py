@@ -3042,20 +3042,14 @@ class GPUModelRunner(
                             detected = True
                     if detected:
                         self._debug_logged_reqs.add(req_id)
-                        # Also log if we have logits available from last forward
-                        if hasattr(self, 'execute_model_state') and self.execute_model_state is not None:
-                            try:
-                                logits = self.execute_model_state.logits
-                                if logits is not None:
-                                    # Get top-5 logits for this request
-                                    req_logits = logits[req_idx]
-                                    top5_vals, top5_ids = torch.topk(req_logits, 5)
-                                    logger.warning(
-                                        "[REPETITION_BUG] LOGITS req_id=%s top5_ids=%s top5_vals=%s",
-                                        req_id[:16], top5_ids.tolist(), top5_vals.tolist()
-                                    )
-                            except Exception as e:
-                                logger.warning("[REPETITION_BUG] Failed to get logits: %s", e)
+                        # Log the FULL output token history to see when repetition started
+                        full_history = list(req_state.output_token_ids)
+                        logger.warning(
+                            "[REPETITION_BUG] FULL_HISTORY req_id=%s len=%d first_50=%s last_50=%s",
+                            req_id[:16], len(full_history),
+                            full_history[:50] if len(full_history) > 50 else full_history,
+                            full_history[-50:] if len(full_history) > 50 else []
+                        )
             elif not self.use_async_scheduling:
                 # Sync scheduling - check output_token_ids directly
                 output_ids = req_state.output_token_ids
@@ -3147,12 +3141,15 @@ class GPUModelRunner(
                 if shared:
                     block_collisions.append((other_req_id[:16], list(shared)[:5]))
 
-        # Get block table row for this request (from GPU buffer)
+        # Get block table row for this request (from CPU and GPU buffers)
         block_table_row = None
+        block_table_gpu_row = None
         try:
             bt = self.input_batch.block_table[0]  # First KV cache group
             num_blocks_in_table = bt.num_blocks_per_row[req_idx]
             block_table_row = bt.block_table.np[req_idx, :min(num_blocks_in_table, 10)].tolist()
+            # Also get GPU block table to compare
+            block_table_gpu_row = bt.block_table.gpu[req_idx, :min(num_blocks_in_table, 10)].tolist()
         except Exception:
             pass
 
@@ -3199,7 +3196,7 @@ class GPUModelRunner(
             "num_computed=%d num_computed_cpu=%d num_tokens=%d "
             "num_tokens_no_spec=%d num_prompt=%d "
             "num_blocks=%d all_blocks=%s "
-            "block_table_row=%s seq_len=%s query_start_loc=%s "
+            "block_table_row=%s block_table_gpu=%s seq_len=%s query_start_loc=%s"
             "input_token=%s "
             "num_output_tokens=%d "
             "token_history=%s nearby_gpu_tokens=%s "
@@ -3215,6 +3212,7 @@ class GPUModelRunner(
             len(all_block_ids),
             all_block_ids[:10],  # First 10 blocks
             block_table_row,
+            block_table_gpu_row,
             seq_len_value,
             query_start_loc_value,
             input_token_value,
