@@ -3015,31 +3015,29 @@ class GPUModelRunner(
                 if len(history) > 50:
                     history.pop(0)
                 # Detect various repetition patterns (only log once per request)
+                # Non-English words can be up to 20+ tokens, so check patterns 2-25
                 if len(history) >= 6:
                     detected = False
-                    # Check for 2-token pattern repeated 3x (like "word" + " ")
-                    p2 = tuple(history[-2:])
-                    p2_prev = tuple(history[-4:-2])
-                    p2_prev2 = tuple(history[-6:-4])
-                    if p2 == p2_prev == p2_prev2:
-                        self._log_repetition_debug(
-                            req_id, req_idx, -998, history  # -998 = 2-token pattern
-                        )
-                        detected = True
-                    # Check for same token 6x in a row
-                    elif len(set(history[-6:])) == 1:
-                        self._log_repetition_debug(
-                            req_id, req_idx, history[-1], history
-                        )
-                        detected = True
-                    # Check for low diversity (same 2 tokens dominate last 10)
-                    elif len(history) >= 10:
-                        from collections import Counter
-                        counts = Counter(history[-10:])
-                        top2 = counts.most_common(2)
-                        if len(top2) >= 1 and top2[0][1] >= 8:
+                    # Check for N-token patterns repeated 2x (N=2 to 25)
+                    # Only need 2 repetitions to detect, checking up to half history
+                    max_pattern = min(25, len(history) // 2)
+                    for pattern_len in range(2, max_pattern + 1):
+                        p = tuple(history[-pattern_len:])
+                        p_prev = tuple(history[-pattern_len*2:-pattern_len])
+                        if p == p_prev:
                             self._log_repetition_debug(
-                                req_id, req_idx, -997, history  # -997 = low diversity
+                                req_id, req_idx, -pattern_len, history
+                            )
+                            detected = True
+                            break
+                    # Check for low diversity (same token dominates last 20)
+                    if not detected and len(history) >= 20:
+                        from collections import Counter
+                        counts = Counter(history[-20:])
+                        top = counts.most_common(1)
+                        if top and top[0][1] >= 12:
+                            self._log_repetition_debug(
+                                req_id, req_idx, -900, history  # -900 = low diversity
                             )
                             detected = True
                     if detected:
@@ -3054,29 +3052,27 @@ class GPUModelRunner(
                     if req_id in self._debug_logged_reqs:
                         continue
                     detected = False
-                    # Check for 2-token pattern repeated 3x
-                    p2 = tuple(output_ids[-2:])
-                    p2_prev = tuple(output_ids[-4:-2])
-                    p2_prev2 = tuple(output_ids[-6:-4])
-                    if p2 == p2_prev == p2_prev2 and p2[0] != -1:
-                        self._log_repetition_debug(
-                            req_id, req_idx, -998, list(output_ids[-15:])
-                        )
-                        detected = True
-                    # Check for same token 6x in a row
-                    elif len(set(output_ids[-6:])) == 1 and output_ids[-1] != -1:
-                        self._log_repetition_debug(
-                            req_id, req_idx, output_ids[-1], list(output_ids[-15:])
-                        )
-                        detected = True
-                    # Check for low diversity
-                    elif len(output_ids) >= 10:
-                        from collections import Counter
-                        counts = Counter(output_ids[-10:])
-                        top = counts.most_common(1)
-                        if top and top[0][1] >= 8 and top[0][0] != -1:
+                    # Check for N-token patterns repeated 2x (N=2 to 25)
+                    # Non-English words can be up to 20+ tokens
+                    max_pattern = min(25, len(output_ids) // 2)
+                    for pattern_len in range(2, max_pattern + 1):
+                        p = tuple(output_ids[-pattern_len:])
+                        p_prev = tuple(output_ids[-pattern_len*2:-pattern_len])
+                        if p == p_prev and p[0] != -1:
                             self._log_repetition_debug(
-                                req_id, req_idx, -997, list(output_ids[-15:])
+                                req_id, req_idx, -pattern_len,
+                                list(output_ids[-50:])
+                            )
+                            detected = True
+                            break
+                    # Check for low diversity
+                    if not detected and len(output_ids) >= 20:
+                        from collections import Counter
+                        counts = Counter(output_ids[-20:])
+                        top = counts.most_common(1)
+                        if top and top[0][1] >= 12 and top[0][0] != -1:
+                            self._log_repetition_debug(
+                                req_id, req_idx, -900, list(output_ids[-50:])
                             )
                             detected = True
                     if detected:
