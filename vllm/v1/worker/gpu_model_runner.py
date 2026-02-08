@@ -3159,6 +3159,7 @@ class GPUModelRunner(
         # Get seq_lens if available
         seq_len_value = None
         query_start_loc_value = None
+        input_token_value = None
         try:
             if hasattr(self, 'seq_lens') and self.seq_lens is not None:
                 seq_len_value = self.seq_lens.np[req_idx]
@@ -3168,6 +3169,9 @@ class GPUModelRunner(
                 start_idx = max(0, req_idx)
                 end_idx = min(req_idx + 3, num_reqs + 1)
                 query_start_loc_value = self.query_start_loc.np[start_idx:end_idx].tolist()
+            # Get the actual input token that was fed to the model
+            if hasattr(self, 'input_ids') and self.input_ids is not None:
+                input_token_value = self.input_ids.gpu[req_idx].item()
         except Exception:
             pass
 
@@ -3196,6 +3200,7 @@ class GPUModelRunner(
             "num_tokens_no_spec=%d num_prompt=%d "
             "num_blocks=%d all_blocks=%s "
             "block_table_row=%s seq_len=%s query_start_loc=%s "
+            "input_token=%s "
             "num_output_tokens=%d "
             "token_history=%s nearby_gpu_tokens=%s "
             "block_collisions=%s non_prefix_duplicates=%s",
@@ -3212,6 +3217,7 @@ class GPUModelRunner(
             block_table_row,
             seq_len_value,
             query_start_loc_value,
+            input_token_value,
             len(req_state.output_token_ids),
             token_history[-15:],  # Last 15 tokens
             nearby_gpu_tokens,
