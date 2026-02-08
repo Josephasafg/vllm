@@ -2997,6 +2997,12 @@ class GPUModelRunner(
             if self.input_batch.prev_sampled_token_ids is None:
                 assert sampled_token_ids.shape[-1] == 1
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
+                logger.info(
+                    "[REPETITION_BUG] INIT prev_sampled_token_ids, "
+                    "same_tensor=%s data_ptr=%s",
+                    self.input_batch.prev_sampled_token_ids is sampled_token_ids,
+                    sampled_token_ids.data_ptr(),
+                )
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
@@ -3039,35 +3045,61 @@ class GPUModelRunner(
             # [REPETITION_BUG] Detect token repetition for debugging
             # In async mode, check the actual sampled token from GPU
             if self.use_async_scheduling and len(sampled_ids) == 1:
-                actual_token = sampled_ids[0]  # This is -1 placeholder
                 # Check GPU tensor for actual token if available
-                if self.input_batch.prev_sampled_token_ids is not None:
-                    gpu_token = self.input_batch.prev_sampled_token_ids[
-                        req_idx, 0
-                    ].item()
-                    # Track last N tokens for this request to detect repetition
-                    if not hasattr(self, "_debug_token_history"):
-                        self._debug_token_history: dict[str, list[int]] = {}
-                    history = self._debug_token_history.setdefault(req_id, [])
-                    history.append(gpu_token)
-                    if len(history) > 20:
-                        history.pop(0)
-                    # Detect repeated pattern (same token 10x or repeated 3-token pattern)
-                    if len(history) >= 10:
-                        last_10 = history[-10:]
-                        if len(set(last_10)) == 1:
+                if self.input_batch.prev_sampled_token_ids is None:
+                    logger.warning(
+                        "[REPETITION_BUG] prev_sampled_token_ids is None for req=%s",
+                        req_id,
+                    )
+                    continue
+                # NOTE: In async non-spec mode, prev_sampled_token_ids might
+                # reference the current sampled_token_ids tensor (same object)
+                # so reading from it gives current step's tokens
+                gpu_token = self.input_batch.prev_sampled_token_ids[
+                    req_idx, 0
+                ].item()
+                # Track last N tokens for this request to detect repetition
+                if not hasattr(self, "_debug_token_history"):
+                    self._debug_token_history: dict[str, list[int]] = {}
+                history = self._debug_token_history.setdefault(req_id, [])
+                history.append(gpu_token)
+                if len(history) > 50:
+                    history.pop(0)
+                # Periodic log every 50 tokens to confirm detection is running
+                total_tokens = len(req_state.output_token_ids)
+                if total_tokens > 0 and total_tokens % 50 == 0:
+                    logger.info(
+                        "[REPETITION_BUG] TRACKING req=%s total_out=%d "
+                        "last_10_gpu=%s",
+                        req_id[:16],
+                        total_tokens,
+                        history[-10:] if len(history) >= 10 else history,
+                    )
+                # Detect various repetition patterns
+                if len(history) >= 6:
+                    # Check for 2-token pattern repeated 3x (like "word" + " ")
+                    p2 = tuple(history[-2:])
+                    p2_prev = tuple(history[-4:-2])
+                    p2_prev2 = tuple(history[-6:-4])
+                    if p2 == p2_prev == p2_prev2:
+                        self._log_repetition_debug(
+                            req_id, req_idx, -998, history  # -998 = 2-token pattern
+                        )
+                    # Check for same token 6x in a row
+                    last_6 = history[-6:]
+                    if len(set(last_6)) == 1:
+                        self._log_repetition_debug(
+                            req_id, req_idx, last_6[0], history
+                        )
+                    # Check for low diversity (same 2 tokens dominate last 10)
+                    elif len(history) >= 10:
+                        from collections import Counter
+                        counts = Counter(history[-10:])
+                        top2 = counts.most_common(2)
+                        if len(top2) >= 1 and top2[0][1] >= 8:
                             self._log_repetition_debug(
-                                req_id, req_idx, last_10[0], history
+                                req_id, req_idx, -997, history  # -997 = low diversity
                             )
-                        # Also check for repeated 3-token pattern
-                        elif len(history) >= 12:
-                            pattern = tuple(history[-3:])
-                            prev_pattern = tuple(history[-6:-3])
-                            prev_prev = tuple(history[-9:-6])
-                            if pattern == prev_pattern == prev_prev:
-                                self._log_repetition_debug(
-                                    req_id, req_idx, -999, history  # -999 = pattern
-                                )
             elif not self.use_async_scheduling and len(req_state.output_token_ids) >= 10:
                 last_10 = req_state.output_token_ids[-10:]
                 if len(set(last_10)) == 1 and last_10[0] != -1:
