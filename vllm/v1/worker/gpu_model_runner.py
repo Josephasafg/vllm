@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import logging
 import threading
 import time
 from collections import defaultdict
@@ -1117,6 +1118,22 @@ class GPUModelRunner(
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
+        # [REPETITION_BUG] Check for block collisions across requests
+        if logger.isEnabledFor(logging.DEBUG):
+            all_blocks: set[int] = set()
+            for req_id in self.input_batch.req_ids:
+                req_state = self.requests.get(req_id)
+                if req_state and req_state.block_ids:
+                    for block_list in req_state.block_ids:
+                        for block_id in block_list:
+                            if block_id in all_blocks:
+                                logger.warning(
+                                    "[REPETITION_BUG] BLOCK_COLLISION block=%d req=%s",
+                                    block_id,
+                                    req_id,
+                                )
+                            all_blocks.add(block_id)
+
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
@@ -1592,19 +1609,40 @@ class GPUModelRunner(
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # In async scheduling, resolve -1 placeholder tokens in token_ids_cpu
-        # with real sampled tokens before preparing input IDs. This ensures
-        # that if a request falls back to token_ids_cpu (e.g., due to being
-        # excluded from prev_req_id_to_index), it has correct token values.
-        if self.use_async_scheduling:
-            self.input_batch.resolve_async_token_placeholders()
-
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
             scheduler_output,
             total_num_scheduled_tokens,
             cu_num_tokens,
         )
+
+        # [REPETITION_BUG] Log a sample of input_ids and positions for debugging
+        if logger.isEnabledFor(logging.DEBUG):
+            for i in range(min(3, num_reqs)):  # Log first 3 requests
+                req_id = self.input_batch.req_ids[i]
+                seq_len = self.seq_lens.np[i]
+                num_computed = self.input_batch.num_computed_tokens_cpu[i]
+                num_sched = num_scheduled_tokens[i]
+                # Tokens that will be INPUT to the model this step
+                # (at positions num_computed to num_computed + num_sched)
+                input_tokens = self.input_batch.token_ids_cpu[
+                    i, num_computed : num_computed + num_sched
+                ]
+                # Also show the few tokens before (context)
+                context_start = max(0, num_computed - 3)
+                context_tokens = self.input_batch.token_ids_cpu[
+                    i, context_start:num_computed
+                ]
+                logger.debug(
+                    "[REPETITION_BUG] INPUT req=%s num_computed=%d num_sched=%d "
+                    "seq_len=%d context_tokens=%s input_tokens=%s",
+                    req_id,
+                    num_computed,
+                    num_sched,
+                    seq_len,
+                    context_tokens.tolist(),
+                    input_tokens.tolist(),
+                )
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2995,6 +3033,12 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
+            # [REPETITION_BUG] Detect token repetition for debugging
+            if len(req_state.output_token_ids) >= 10:
+                last_10 = req_state.output_token_ids[-10:]
+                if len(set(last_10)) == 1:
+                    self._log_repetition_debug(req_id, req_idx, last_10[0])
+
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states[:num_scheduled_tokens],
@@ -3009,6 +3053,50 @@ class GPUModelRunner(
             req_ids_output_copy,
             req_id_to_index_output_copy,
             invalid_req_indices,
+        )
+
+    def _log_repetition_debug(
+        self, req_id: str, req_idx: int, repeated_token: int
+    ) -> None:
+        """Log comprehensive debug info when repetition is detected."""
+        req_state = self.requests[req_id]
+
+        # Get block table for this request
+        block_ids = req_state.block_ids
+
+        # Get position info
+        num_computed = req_state.num_computed_tokens
+        num_tokens = req_state.num_tokens
+        num_tokens_no_spec = self.input_batch.num_tokens_no_spec[req_idx]
+        num_prompt = self.input_batch.num_prompt_tokens[req_idx]
+
+        # Get the last few tokens that were written to token_ids_cpu
+        # This shows what tokens are actually in the buffer
+        last_5_pos = max(0, num_tokens_no_spec - 5)
+        last_tokens_in_buffer = self.input_batch.token_ids_cpu[
+            req_idx, last_5_pos:num_tokens_no_spec
+        ].tolist()
+
+        # Get the last few output_token_ids for comparison
+        last_5_output = req_state.output_token_ids[-5:]
+
+        logger.warning(
+            "[REPETITION_BUG] DETECTED req_id=%s req_idx=%d "
+            "repeated_token=%d "
+            "num_computed=%d num_tokens=%d num_tokens_no_spec=%d num_prompt=%d "
+            "block_ids=%s num_output_tokens=%d "
+            "last_tokens_in_buffer=%s last_output_ids=%s",
+            req_id,
+            req_idx,
+            repeated_token,
+            num_computed,
+            num_tokens,
+            num_tokens_no_spec,
+            num_prompt,
+            block_ids[0][:3] if block_ids else None,  # First 3 blocks
+            len(req_state.output_token_ids),
+            last_tokens_in_buffer,
+            last_5_output,
         )
 
     @contextmanager
