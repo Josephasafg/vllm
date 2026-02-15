@@ -1017,81 +1017,58 @@ class MambaManager(SingleTypeKVCacheManager):
         num_computed_tokens: int,
         num_tokens: int,
     ) -> None:
-        """Track which blocks were written and at what position.
+        """Track which blocks the kernel wrote and at what sequence position.
 
-        The kernel writes to blocks based on chunk boundaries:
-        - Intermediate chunks write to block_idx_first_scheduled + chunk_idx
-        - Last chunk writes to block_idx_last_scheduled
+        Mirrors kernel behavior: intermediate chunks write at block boundaries,
+        last chunk writes at the final token position.
         """
-        if request_id not in self.block_write_positions:
-            self.block_write_positions[request_id] = {}
-
         seqlen = num_tokens - num_computed_tokens
         if seqlen <= 0:
             return
 
+        positions = self.block_write_positions.setdefault(request_id, {})
         n_chunks = cdiv(seqlen, self.block_size)
+        block_idx_first = num_computed_tokens // self.block_size
 
         for chunk_idx in range(n_chunks):
-            if chunk_idx == n_chunks - 1:
-                # Last chunk writes to block_idx_last_scheduled
+            is_last = chunk_idx == n_chunks - 1
+            if is_last:
                 block_idx = (num_tokens - 1) // self.block_size
                 write_pos = num_tokens
             else:
-                # Intermediate chunk writes to block_idx_first_scheduled + chunk
-                block_idx_first = num_computed_tokens // self.block_size
                 block_idx = block_idx_first + chunk_idx
                 write_pos = num_computed_tokens + (chunk_idx + 1) * self.block_size
-
-            self.block_write_positions[request_id][block_idx] = write_pos
+            positions[block_idx] = write_pos
 
     def _get_num_cacheable_blocks(self, request_id: str, num_tokens: int) -> int:
-        """Return the number of blocks that have complete SSM state.
+        """Return count of contiguous blocks with complete SSM state.
 
-        A block N is complete if its write_position == (N+1) * block_size EXACTLY.
-        Using >= would allow "overstuffed" blocks (state covers more than the hash).
-        Blocks must be cached contiguously from the first uncached block.
+        A block is complete iff write_pos == (block_idx + 1) * block_size exactly.
+        Using >= would allow overstuffed blocks where state covers more than hash.
         """
         num_full_blocks = num_tokens // self.block_size
-        # Start from already-cached blocks (from prefix cache hits - they are valid)
         num_already_cached = self.num_cached_block.get(request_id, 0)
-        write_positions = self.block_write_positions.get(request_id, {})
+        positions = self.block_write_positions.get(request_id, {})
 
-        num_cacheable = num_already_cached
         for block_idx in range(num_already_cached, num_full_blocks):
-            write_pos = write_positions.get(block_idx, 0)
-            # MUST be exact match - not >= !
-            # >= would cache overstuffed blocks where state covers more than hash
-            if write_pos == (block_idx + 1) * self.block_size:
-                num_cacheable = block_idx + 1
-            else:
-                break  # Blocks must be cached contiguously
-
-        return num_cacheable
+            expected = (block_idx + 1) * self.block_size
+            if positions.get(block_idx, 0) != expected:
+                return block_idx  # First incomplete block = cacheable count
+        return num_full_blocks
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
 
         if self.mamba_cache_mode == "all":
-            # For "all" mode, track which blocks have complete SSM state
-            # request.num_computed_tokens is still the old value at this point
-            num_computed_tokens = request.num_computed_tokens
-
-            # Update tracking of which blocks were written this step
+            # Track block writes and only cache blocks with complete SSM state
             self._update_block_write_positions(
-                request.request_id, num_computed_tokens, num_tokens
+                request.request_id, request.num_computed_tokens, num_tokens
             )
-
-            # Only cache blocks that have complete SSM state
             num_cacheable = self._get_num_cacheable_blocks(
                 request.request_id, num_tokens
             )
-            effective_num_tokens = num_cacheable * self.block_size
-
-            # Call parent with adjusted num_tokens
-            super().cache_blocks(request, effective_num_tokens)
+            super().cache_blocks(request, num_cacheable * self.block_size)
         else:
-            # For "none" and "align" modes, use standard logic
             super().cache_blocks(request, num_tokens)
 
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
