@@ -351,6 +351,15 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
+    def clear_kv_cache(self) -> None:
+        """Zero out all KV cache tensors.
+
+        This clears all cached key-value data from GPU memory by setting
+        all tensor values to zero. Useful for debugging or ensuring no
+        stale KV cache data persists between runs.
+        """
+        self.engine_core.clear_kv_cache()
+
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 

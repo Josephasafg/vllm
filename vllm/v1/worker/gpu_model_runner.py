@@ -737,6 +737,17 @@ class GPUModelRunner(
         """
         self.encoder_cache.clear()
 
+    def clear_kv_cache(self) -> None:
+        """Zero out all KV cache tensors.
+
+        This clears all cached key-value data from GPU memory by setting
+        all tensor values to zero. Useful for debugging or ensuring no
+        stale KV cache data persists between runs.
+        """
+        for cache_tensor in self.kv_caches:
+            if cache_tensor is not None:
+                cache_tensor.zero_()
+
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
         """
