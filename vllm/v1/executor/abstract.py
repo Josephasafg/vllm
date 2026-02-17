@@ -294,6 +294,10 @@ class Executor(ABC):
         """Reset the multi-modal cache in each worker."""
         self.collective_rpc("reset_mm_cache")
 
+    def clear_kv_cache(self) -> None:
+        """Zero out all KV cache tensors in each worker."""
+        self.collective_rpc("clear_kv_cache")
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")

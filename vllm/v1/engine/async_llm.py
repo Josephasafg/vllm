@@ -752,6 +752,15 @@ class AsyncLLM(EngineClient):
             reset_running_requests, reset_connector
         )
 
+    async def clear_kv_cache(self) -> None:
+        """Zero out all KV cache tensors.
+
+        This clears all cached key-value data from GPU memory by setting
+        all tensor values to zero. Useful for debugging or ensuring no
+        stale KV cache data persists between runs.
+        """
+        await self.engine_core.clear_kv_cache_async()
+
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)

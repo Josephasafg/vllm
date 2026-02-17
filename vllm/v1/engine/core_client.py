@@ -144,6 +144,9 @@ class EngineCoreClient(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    def clear_kv_cache(self) -> None:
+        raise NotImplementedError
+
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
@@ -214,6 +217,9 @@ class EngineCoreClient(ABC):
     async def reset_prefix_cache_async(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
+        raise NotImplementedError
+
+    async def clear_kv_cache_async(self) -> None:
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1) -> None:
@@ -299,6 +305,9 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
+
+    def clear_kv_cache(self) -> None:
+        self.engine_core.clear_kv_cache()
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
@@ -770,6 +779,9 @@ class SyncMPClient(MPClient):
             "reset_prefix_cache", reset_running_requests, reset_connector
         )
 
+    def clear_kv_cache(self) -> None:
+        self.call_utility("clear_kv_cache")
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)
 
@@ -977,6 +989,9 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "reset_prefix_cache", reset_running_requests, reset_connector
         )
+
+    async def clear_kv_cache_async(self) -> None:
+        await self.call_utility_async("clear_kv_cache")
 
     async def sleep_async(self, level: int = 1) -> None:
         await self.call_utility_async("sleep", level)
