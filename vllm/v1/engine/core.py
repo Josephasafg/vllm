@@ -592,6 +592,15 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def clear_kv_cache(self) -> None:
+        """Zero out all KV cache tensors.
+
+        This clears all cached key-value data from GPU memory by setting
+        all tensor values to zero. Useful for debugging or ensuring no
+        stale KV cache data persists between runs.
+        """
+        self.collective_rpc("clear_kv_cache")
+
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future[Any] | None:
