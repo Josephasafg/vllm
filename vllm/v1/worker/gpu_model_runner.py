@@ -744,9 +744,16 @@ class GPUModelRunner(
         all tensor values to zero. Useful for debugging or ensuring no
         stale KV cache data persists between runs.
         """
-        for cache_tensor in self.kv_caches:
-            if cache_tensor is not None:
-                cache_tensor.zero_()
+        for cache_entry in self.kv_caches:
+            if cache_entry is None:
+                continue
+            # Mamba layers store a list of tensors (conv + ssm state)
+            if isinstance(cache_entry, list):
+                for tensor in cache_entry:
+                    if tensor is not None:
+                        tensor.zero_()
+            else:
+                cache_entry.zero_()
 
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
