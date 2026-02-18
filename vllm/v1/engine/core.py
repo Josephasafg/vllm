@@ -606,6 +606,9 @@ class EngineCore:
         and overridden in EngineCoreProc."""
         return False
 
+    def clear_kv_cache(self) -> None:
+        self.collective_rpc("clear_kv_cache")
+
     def sleep(self, level: int = 1):
         """Put the engine to sleep at the specified level.
 

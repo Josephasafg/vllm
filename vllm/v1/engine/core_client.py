@@ -159,6 +159,9 @@ class EngineCoreClient(ABC):
     def is_sleeping(self) -> bool:
         raise NotImplementedError
 
+    def clear_kv_cache(self) -> None:
+        raise NotImplementedError
+
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
 
@@ -222,6 +225,9 @@ class EngineCoreClient(ABC):
     async def reset_prefix_cache_async(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
+        raise NotImplementedError
+
+    async def clear_kv_cache_async(self) -> None:
         raise NotImplementedError
 
     async def reset_encoder_cache_async(self) -> None:
@@ -316,6 +322,9 @@ class InprocClient(EngineCoreClient):
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
+
+    def clear_kv_cache(self) -> None:
+        self.engine_core.clear_kv_cache()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.engine_core.wake_up(tags)
@@ -802,6 +811,9 @@ class SyncMPClient(MPClient):
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.call_utility("wake_up", tags)
 
+    def clear_kv_cache(self) -> None:
+        self.call_utility("clear_kv_cache")
+
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
 
@@ -1017,6 +1029,9 @@ class AsyncMPClient(MPClient):
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
+
+    async def clear_kv_cache_async(self) -> None:
+        await self.call_utility_async("clear_kv_cache")
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")

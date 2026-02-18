@@ -1519,6 +1519,9 @@ class LLM:
 
         return [ScoringRequestOutput.from_base(item) for item in items]
 
+    def clear_kv_cache(self) -> None:
+        self.llm_engine.clear_kv_cache()
+
     def score(
         self,
         data_1: SingletonPrompt

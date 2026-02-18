@@ -201,6 +201,9 @@ class Worker(WorkerBase):
         ):
             self.model_runner.init_fp8_kv_scales()
 
+    def clear_kv_cache(self) -> None:
+        self.model_runner.clear_kv_cache()
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator

@@ -714,6 +714,17 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self.layerwise_nvtx_hooks_registered = False
 
+    def clear_kv_cache(self) -> None:
+        for cache_entry in self.kv_caches:
+            if cache_entry is None:
+                continue
+            if isinstance(cache_entry, list):
+                for tensor in cache_entry:
+                    if tensor is not None:
+                        tensor.zero_()
+            else:
+                cache_entry.zero_()
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         if self.speculative_config:

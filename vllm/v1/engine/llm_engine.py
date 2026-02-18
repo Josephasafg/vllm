@@ -371,6 +371,9 @@ class LLMEngine:
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
+    def clear_kv_cache(self) -> None:
+        self.engine_core.clear_kv_cache()
+
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
 
