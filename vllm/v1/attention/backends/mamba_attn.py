@@ -48,6 +48,10 @@ class BaseMambaAttentionMetadata:
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token: torch.Tensor | None
 
+    # Chunk alignment: offset within the first block where processing starts
+    # This is num_computed_tokens % block_size for each prefill request
+    chunk_start_offsets_p: torch.Tensor | None
+
     # The following tensor is only used for prefix caching in align mode
     seq_lens: torch.Tensor
 
@@ -200,6 +204,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         block_idx_last_computed_token = None
         block_idx_last_scheduled_token = None
 
+        # for chunk alignment (offset within first block)
+        chunk_start_offsets_p = None
+
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
@@ -258,6 +265,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
                     num_reqs - num_prefills : num_reqs
                 ]
+                # Compute chunk start offsets for chunk alignment
+                # This is the offset within the first block where processing starts
+                mamba_block_size = self.kv_cache_spec.block_size
+                chunk_start_offsets_p = num_computed_tokens_p % mamba_block_size
         elif (
             num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -294,6 +305,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_computed_token=block_idx_last_computed_token,
+            chunk_start_offsets_p=chunk_start_offsets_p,
             num_computed_tokens_p=num_computed_tokens_p,
             num_reqs=num_reqs,
             seq_lens=common_attn_metadata.seq_lens,
