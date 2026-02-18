@@ -1693,6 +1693,9 @@ class LLM:
                            a different model or update the model, where
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
+                - Level 3: Like level 2, but zeros KV cache before freeing.
+                           Ensures clean state for RL workflows after model
+                           weight updates.
         """
         if level > 0:
             self.reset_prefix_cache()
@@ -1881,7 +1884,7 @@ class LLM:
         priorities: Sequence[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
-        if isinstance(prompts, (list, tuple)):
+        if isinstance(prompts, list | tuple):
             logger.warning_once(
                 "Rendering all prompts before adding them to the engine "
                 "is less efficient than performing both on the same prompt "

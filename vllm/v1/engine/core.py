@@ -615,6 +615,7 @@ class EngineCore:
                            but not processed. No GPU memory changes.
                 - Level 1: Offload model weights to CPU, discard KV cache.
                 - Level 2: Discard all GPU memory.
+                - Level 3: Like level 2, but zeros KV cache before freeing.
         """
         if level == 0:
             # Level 0: Just pause scheduling, don't touch GPU

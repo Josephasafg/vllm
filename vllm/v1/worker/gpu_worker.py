@@ -151,12 +151,15 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:
+        if level == 3:
+            self.model_runner.clear_kv_cache()
+
         from vllm.device_allocator.cumem import CuMemAllocator
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
-        # Save the buffers before level 2 sleep
-        if level == 2:
+        # Save the buffers before level 2+ sleep
+        if level >= 2:
             model = self.model_runner.model
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
@@ -180,7 +183,7 @@ class Worker(WorkerBase):
         allocator = CuMemAllocator.get_instance()
         allocator.wake_up(tags)
 
-        # Restore the buffers after level 2 sleep
+        # Restore the buffers after level 2+ sleep
         if len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
