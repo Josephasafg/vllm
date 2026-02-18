@@ -190,6 +190,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int chunk_start_offset = (params.cache_enabled && chunk_start_offsets != nullptr) ?
                                     chunk_start_offsets[batch_id] : 0;
 
+    const int block_idx_first = (params.cache_enabled && block_idx_first_scheduled != nullptr) ?
+                                 block_idx_first_scheduled[batch_id] : 0;
+
     // Calculate aligned chunk sizes:
     // - First chunk: tokens needed to complete the current block (or all tokens if less)
     // - Subsequent chunks: full block_size each (or remaining if less)
@@ -199,9 +202,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int remaining_after_first = max(0, seqlen - first_chunk_size);
     const int n_chunks = 1 + (remaining_after_first + block_size - 1) / block_size;
 
-    // Track how many tokens we've processed and our current position
+    // Track how many tokens we've processed and our absolute position in the sequence
     int tokens_processed = 0;
-    int current_position = chunk_start_offset;  // Position relative to block boundaries
+    int current_position = block_idx_first * block_size + chunk_start_offset;
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         // Calculate how many tokens to process in this chunk
