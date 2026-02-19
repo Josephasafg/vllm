@@ -1556,6 +1556,9 @@ class LLM:
         """
         self.llm_engine.wake_up(tags)
 
+    def clear_kv_cache(self) -> None:
+        self.llm_engine.clear_kv_cache()
+
     def get_metrics(self) -> list["Metric"]:
         """Return a snapshot of aggregated metrics from Prometheus.
 

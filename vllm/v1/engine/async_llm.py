@@ -758,6 +758,9 @@ class AsyncLLM(EngineClient):
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
+    
+    async def clear_kv_cache(self) -> None:
+        await self.engine_core.clear_kv_cache_async()
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)

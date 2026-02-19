@@ -161,6 +161,9 @@ class EngineCoreClient(ABC):
 
     def abort_requests(self, request_ids: list[str]) -> None:
         raise NotImplementedError
+    
+    def clear_kv_cache(self) -> None:
+        raise NotImplementedError
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
@@ -229,6 +232,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
+    
+    async def clear_kv_cache_async(self) -> None:
         raise NotImplementedError
 
     async def remove_lora_async(self, lora_id: int) -> bool:
@@ -320,6 +326,9 @@ class InprocClient(EngineCoreClient):
 
     def list_loras(self) -> set[int]:
         return self.engine_core.list_loras()
+
+    def clear_kv_cache(self) -> None:
+        self.engine_core.clear_kv_cache()
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
@@ -791,6 +800,9 @@ class SyncMPClient(MPClient):
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
 
+    def clear_kv_cache(self) -> None:
+        self.call_utility("clear_kv_cache")
+
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
 
@@ -1001,6 +1013,9 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
+
+    async def clear_kv_cache_async(self) -> None:
+        await self.call_utility_async("clear_kv_cache")
 
     async def save_sharded_state_async(
         self, path: str, pattern: str | None = None, max_size: int | None = None

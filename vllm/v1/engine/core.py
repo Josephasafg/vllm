@@ -589,6 +589,9 @@ class EngineCore:
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
+    
+    def clear_kv_cache(self) -> None:
+        self.collective_rpc("clear_kv_cache")
 
     def save_sharded_state(
         self,

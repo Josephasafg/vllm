@@ -107,12 +107,15 @@ class Worker(WorkerBase):
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
     def sleep(self, level: int = 1) -> None:
+        if self.sleep == 3:
+            self.model_runner.clear_kv_cache()
+
         from vllm.device_allocator.cumem import CuMemAllocator
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
-        if level == 2:
+        if level >= 2:
             model = self.model_runner.model
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
@@ -170,6 +173,9 @@ class Worker(WorkerBase):
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+    
+    def clear_kv_cache(self) -> None:
+        self.model_runner.clear_kv_cache()
 
     def init_device(self):
         if self.device_config.device_type == "cuda":

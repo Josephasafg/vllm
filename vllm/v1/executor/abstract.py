@@ -333,6 +333,9 @@ class Executor(ABC):
             self.sleeping_tags.clear()
         if not self.sleeping_tags:
             self.is_sleeping = False
+    
+    def clear_kv_cache(self) -> None:
+        self.collective_rpc("clear_kv_cache")
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
