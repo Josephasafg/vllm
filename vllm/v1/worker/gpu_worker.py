@@ -107,7 +107,7 @@ class Worker(WorkerBase):
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
     def sleep(self, level: int = 1) -> None:
-        if self.sleep == 3:
+        if level == 3:
             self.model_runner.clear_kv_cache()
 
         from vllm.device_allocator.cumem import CuMemAllocator
