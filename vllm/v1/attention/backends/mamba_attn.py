@@ -142,6 +142,68 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         return self._compute_common_metadata(common_attn_metadata)
 
+    def _compute_chunk_metadata(
+        self,
+        chunk_size: int,
+        num_prefills: int,
+        num_computed_tokens_p_cpu: torch.Tensor,
+        query_start_loc_p_cpu: torch.Tensor,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """
+        Compute chunk-specific metadata for Mamba models.
+
+        The code below carefully constructs the chunks such that:
+        1. Chunks contain tokens from a *single* sequence only.
+        2. For every sequence, we are guaranteed that we can
+           retrieve the mamba state *every* chunk_size tokens.
+        Constraint (1) dramatically simplifies the mamba kernels.
+        Constraint (2) dramatically simplifies the implementation
+        of prefix caching for mamba (wip). We need to take care
+        of the interaction with chunked prefill in order to
+        satisfy constraint (2).
+        """
+        cu_chunk_seqlen: list[int] = []
+        seq_idx: list[int] = []
+        last_chunk_indices: list[int] = []
+        seqlen_pos = 0
+
+        for req_idx in range(num_prefills):
+            this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
+            this_new_tokens = (
+                query_start_loc_p_cpu[req_idx + 1].item()
+                - query_start_loc_p_cpu[req_idx].item()
+            )
+
+            # if computed tokens are not chunk-aligned, use the first
+            # chunk to finish it off
+            if this_num_computed % chunk_size != 0:
+                seq_idx.append(req_idx)
+                cu_chunk_seqlen.append(seqlen_pos)
+                # how many tokens to finish the chunk?
+                chunk_len = (
+                    cdiv(this_num_computed, chunk_size) * chunk_size
+                    - this_num_computed
+                )
+                # we can only use at most this_new_tokens
+                chunk_len = min(chunk_len, this_new_tokens)
+                seqlen_pos += chunk_len
+                this_new_tokens -= chunk_len
+
+            n_chunks = cdiv(this_new_tokens, chunk_size)
+            for chunk in range(n_chunks):
+                seq_idx.append(req_idx)
+                cu_chunk_seqlen.append(seqlen_pos)
+                chunk_len = min(chunk_size, this_new_tokens)
+                seqlen_pos += chunk_len
+                this_new_tokens -= chunk_len
+
+            assert this_new_tokens == 0
+            last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
+
+        cu_chunk_seqlen.append(seqlen_pos)
+
+        return cu_chunk_seqlen, seq_idx, last_chunk_indices
+
     def _compute_prefix_caching_block_indices(
         self,
         common_attn_metadata: CommonAttentionMetadata,
