@@ -50,37 +50,11 @@ class Mamba1AttentionMetadataBuilder(
             common.num_prefills > 0
             and self.vllm_config.cache_config.mamba_cache_mode == "all"
         ):
-            num_reqs = common.num_reqs
-            num_prefills = common.num_prefills
-            num_decode_tokens = common.num_decode_tokens
-
-            num_computed_tokens_cpu = (
-                common_attn_metadata.compute_num_computed_tokens().cpu()
-            )
-            num_computed_tokens_p_cpu = num_computed_tokens_cpu[
-                num_reqs - num_prefills : num_reqs
-            ]
-            query_start_loc_p_cpu = (
-                common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                - num_decode_tokens
-            )
-
-            chunk_size = self.kv_cache_spec.block_size
-            cu_chunk_seqlen, _, last_chunk_indices = (
-                self._compute_chunk_metadata(
-                    chunk_size,
-                    num_prefills,
-                    num_computed_tokens_p_cpu,
-                    query_start_loc_p_cpu,
+            cu_chunk_seqlen_p, _, last_chunk_indices_p = (
+                self._build_chunk_metadata_tensors(
+                    self.kv_cache_spec.block_size, common,
+                    common_attn_metadata,
                 )
-            )
-
-            device = common_attn_metadata.query_start_loc.device
-            cu_chunk_seqlen_p = torch.as_tensor(
-                cu_chunk_seqlen, device=device, dtype=torch.int32,
-            )
-            last_chunk_indices_p = torch.as_tensor(
-                last_chunk_indices, device=device, dtype=torch.int32,
             )
 
         return replace(

@@ -204,6 +204,52 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return cu_chunk_seqlen, seq_idx, last_chunk_indices
 
+    def _build_chunk_metadata_tensors(
+        self,
+        chunk_size: int,
+        common: M,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute chunk metadata and return as device tensors.
+        Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p).
+        """
+        num_reqs = common.num_reqs
+        num_prefills = common.num_prefills
+        num_decode_tokens = common.num_decode_tokens
+
+        num_computed_tokens_cpu = (
+            common_attn_metadata.compute_num_computed_tokens().cpu()
+        )
+        num_computed_tokens_p_cpu = num_computed_tokens_cpu[
+            num_reqs - num_prefills : num_reqs
+        ]
+        query_start_loc_p_cpu = (
+            common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+            - num_decode_tokens
+        )
+
+        cu_chunk_seqlen, seq_idx, last_chunk_indices = (
+            self._compute_chunk_metadata(
+                chunk_size,
+                num_prefills,
+                num_computed_tokens_p_cpu,
+                query_start_loc_p_cpu,
+            )
+        )
+
+        device = common_attn_metadata.query_start_loc.device
+        cu_chunk_seqlen_p = torch.as_tensor(
+            cu_chunk_seqlen, device=device, dtype=torch.int32,
+        )
+        seq_idx_p = torch.as_tensor(
+            seq_idx, device=device, dtype=torch.int32,
+        )
+        last_chunk_indices_p = torch.as_tensor(
+            last_chunk_indices, device=device, dtype=torch.int32,
+        )
+        return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p
+
     def _compute_prefix_caching_block_indices(
         self,
         common_attn_metadata: CommonAttentionMetadata,

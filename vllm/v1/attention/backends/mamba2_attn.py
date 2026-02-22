@@ -145,7 +145,7 @@ class Mamba2AttentionMetadataBuilder(
         last_chunk_indices_p = None
         prep_initial_states = False
 
-        # Compute seq_idx for prefill only
+        # Compute chunk metadata for prefill only
         if common.num_prefills > 0:
             prep_initial_states = (
                 torch.any(common.has_initial_states_p).item()
@@ -153,42 +153,10 @@ class Mamba2AttentionMetadataBuilder(
                 else False
             )
 
-            num_reqs = common.num_reqs
-            num_prefills = common.num_prefills
-            num_decode_tokens = common.num_decode_tokens
-
-            num_computed_tokens_cpu = (
-                common_attn_metadata.compute_num_computed_tokens().cpu()
-            )
-            num_computed_tokens_p_cpu = num_computed_tokens_cpu[
-                num_reqs - num_prefills : num_reqs
-            ]
-            query_start_loc_p_cpu = (
-                common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                - num_decode_tokens
-            )
-
-            cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
-                self.chunk_size,
-                num_prefills,
-                num_computed_tokens_p_cpu,
-                query_start_loc_p_cpu,
-            )
-
-            seq_idx_p = torch.as_tensor(
-                seq_idx,
-                device=common_attn_metadata.query_start_loc.device,
-                dtype=torch.int32,
-            )
-            cu_chunk_seqlen_p = torch.as_tensor(
-                cu_chunk_seqlen,
-                device=common_attn_metadata.query_start_loc.device,
-                dtype=torch.int32,
-            )
-            last_chunk_indices_p = torch.as_tensor(
-                last_chunk_indices,
-                device=common_attn_metadata.query_start_loc.device,
-                dtype=torch.int32,
+            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
+                self._build_chunk_metadata_tensors(
+                    self.chunk_size, common, common_attn_metadata,
+                )
             )
 
         return replace(
