@@ -149,15 +149,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
 
-        # Buffer for has_initial_states_d (needed for CUDA graph capture).
-        # During CG capture all dummy requests have num_computed_tokens==0,
-        # so the zeroing code always runs and must use CG-compatible ops.
-        self.has_initial_states_d: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs,),
-            dtype=torch.bool,
-            device=device,
-        )
-
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
             self.supports_update_block_table = False
@@ -425,8 +416,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
-        # Always computed when decodes exist so the gather-multiply-scatter
-        # path in _zero_states_for_new_requests is captured by CUDA graphs.
+        # Computed when decodes exist so the model runner can zero states
+        # for new requests outside the CUDA graph boundary.
         if num_decodes > 0:
             if num_computed_tokens is None:
                 num_computed_tokens = (
@@ -506,7 +497,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         state_indices_tensor_d = metadata.state_indices_tensor_d
-        has_initial_states_d = metadata.has_initial_states_d
         query_start_loc_d = metadata.query_start_loc_d
         num_accepted_tokens = metadata.num_accepted_tokens
         block_idx_last_scheduled_token = metadata.block_idx_last_scheduled_token
@@ -522,19 +512,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
             state_indices_tensor_d[metadata.num_decodes :] = PAD_SLOT_ID
-
-            # Copy has_initial_states_d into pre-allocated CG buffer.
-            if has_initial_states_d is not None:
-                self.has_initial_states_d[: metadata.num_decodes].copy_(
-                    has_initial_states_d, non_blocking=True
-                )
-            else:
-                self.has_initial_states_d[: metadata.num_decodes].fill_(
-                    True
-                )
-            has_initial_states_d = self.has_initial_states_d[:padded_bs]
-            # Padded slots: mark as "has state" so zeroing is a no-op.
-            has_initial_states_d[metadata.num_decodes :] = True
 
             if self.use_spec_decode:
                 assert query_start_loc_d is not None
@@ -570,7 +547,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         return replace(
             metadata,
             state_indices_tensor_d=state_indices_tensor_d,
-            has_initial_states_d=has_initial_states_d,
             query_start_loc_d=query_start_loc_d,
             num_accepted_tokens=num_accepted_tokens,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,

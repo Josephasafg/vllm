@@ -831,15 +831,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
 
-            has_initial_states_d = attn_metadata.has_initial_states_d
-            if has_initial_states_d is not None:
-                self._zero_states_for_new_requests(
-                    ssm_state,
-                    conv_state,
-                    state_indices_tensor_d_input,
-                    has_initial_states_d,
-                )
-
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,

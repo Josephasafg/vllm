@@ -3683,6 +3683,15 @@ class GPUModelRunner(
                 )
             )
 
+            # Zero Mamba states for new requests outside the CUDA graph
+            # boundary. This allows conditional execution (skip when not
+            # needed) and simpler direct zeroing vs CG-compatible masking.
+            mamba_utils.zero_mamba_states_for_new_requests(
+                attn_metadata,
+                self.attn_groups,
+                self.compilation_config.static_forward_context,
+            )
+
             (
                 input_ids,
                 inputs_embeds,
