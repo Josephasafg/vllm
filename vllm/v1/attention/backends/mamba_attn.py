@@ -43,6 +43,7 @@ class BaseMambaAttentionMetadata:
     # The following tensors are used for decode requests and
     # speculative decoding compatibility, and will be None if the batch
     # has no decode requests.
+    has_initial_states_d: torch.Tensor | None
     state_indices_tensor_d: torch.Tensor | None
     query_start_loc_d: torch.Tensor | None  # shape: [num_decodes + 1,]
 
@@ -364,6 +365,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         # Need flags to indicate if there are initial states
         has_initial_states_p = None
+        has_initial_states_d = None
         query_start_loc_p = None
         query_start_loc_d = None
         num_computed_tokens = None
@@ -414,6 +416,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
+        # Detect new requests that landed in the decode batch.
+        # They have num_computed_tokens == 0 and need their SSM/conv state
+        # zeroed before the decode kernel reads it.
+        if num_decodes > 0:
+            if num_computed_tokens is None:
+                num_computed_tokens = (
+                    common_attn_metadata.compute_num_computed_tokens()
+                )
+            decode_computed = num_computed_tokens[:num_decodes]
+            if not decode_computed.all():
+                has_initial_states_d = decode_computed > 0
+
         if num_decodes > 0 and self.use_spec_decode:
             assert num_accepted_tokens is not None
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
@@ -459,6 +473,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_decode_tokens=num_decode_tokens,
             query_start_loc_p=query_start_loc_p,
             has_initial_states_p=has_initial_states_p,
+            has_initial_states_d=has_initial_states_d,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
             num_accepted_tokens=num_accepted_tokens,
