@@ -834,12 +834,24 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # Zero state for new requests that were classified as decode.
             # Without this, the decode kernel loads stale/uninitialized
             # state from a recycled cache slot, corrupting SSM recurrence.
+            # Uses multiplicative masking (gather-multiply-scatter) instead
+            # of boolean indexing so the ops are CUDA-graph compatible.
             has_initial_states_d = attn_metadata.has_initial_states_d
             if has_initial_states_d is not None:
-                new_decode_mask = ~has_initial_states_d
-                new_indices = state_indices_tensor_d_input[new_decode_mask]
-                ssm_state[new_indices] = 0
-                conv_state[new_indices] = 0
+                indices = state_indices_tensor_d_input
+                # has_initial_states_d: True = has state (keep),
+                #                       False = new request (zero)
+                ssm_gathered = ssm_state[indices]
+                keep = has_initial_states_d.to(ssm_gathered.dtype)
+                keep = keep.view(-1, *([1] * (ssm_gathered.dim() - 1)))
+                ssm_state[indices] = ssm_gathered * keep
+
+                conv_gathered = conv_state[indices]
+                keep_conv = has_initial_states_d.to(conv_gathered.dtype)
+                keep_conv = keep_conv.view(
+                    -1, *([1] * (conv_gathered.dim() - 1))
+                )
+                conv_state[indices] = conv_gathered * keep_conv
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
