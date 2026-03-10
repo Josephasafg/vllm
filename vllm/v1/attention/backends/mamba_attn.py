@@ -416,14 +416,20 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
-        # Computed when decodes exist so the model runner can zero states
-        # for new requests outside the CUDA graph boundary.
+        # Only set when there are genuinely new decode requests
+        # (num_computed_tokens == 0, seq_lens > 0). Padded CG slots
+        # (seq_lens == 0) are excluded so their PAD_SLOT_ID doesn't
+        # cause zeroing of the last real cache slot.
         if num_decodes > 0:
             if num_computed_tokens is None:
                 num_computed_tokens = (
                     common_attn_metadata.compute_num_computed_tokens()
                 )
-            has_initial_states_d = num_computed_tokens[:num_decodes] > 0
+            has_initial_states_d = (
+                num_computed_tokens[:num_decodes] > 0
+            ) | (common_attn_metadata.seq_lens[:num_decodes] == 0)
+            if has_initial_states_d.all():
+                has_initial_states_d = None
 
         if num_decodes > 0 and self.use_spec_decode:
             assert num_accepted_tokens is not None
