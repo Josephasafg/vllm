@@ -425,11 +425,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
-        # Detect new requests that landed in the decode batch.
-        # They have num_computed_tokens == 0 and need their SSM/conv state
-        # zeroed before the decode kernel reads it.
-        # Always compute (not conditional) so that the multiplicative
-        # masking ops are captured during CUDA graph recording.
+        # Always computed when decodes exist so the gather-multiply-scatter
+        # path in _zero_states_for_new_requests is captured by CUDA graphs.
         if num_decodes > 0:
             if num_computed_tokens is None:
                 num_computed_tokens = (

@@ -60,3 +60,22 @@ class MambaBase(AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""
         return get_mamba_attn_backend(self.mamba_type)
+
+    @staticmethod
+    def _zero_states_for_new_requests(
+        ssm_state: torch.Tensor,
+        conv_state: torch.Tensor,
+        indices: torch.Tensor,
+        has_initial_states: torch.Tensor,
+    ) -> None:
+        """Zero SSM and conv state for new requests in the decode batch.
+
+        New requests (has_initial_states=False) that land in the decode path
+        — e.g. due to MTP decode_threshold > 1 — would otherwise read stale
+        state from a recycled cache slot.
+        """
+        for state in (ssm_state, conv_state):
+            current_state = state[indices]
+            has_prior_state = has_initial_states.to(
+                current_state.dtype)[:, None, None]
+            state[indices] = current_state * has_prior_state
