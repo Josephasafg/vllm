@@ -76,6 +76,10 @@ class MambaBase(AttentionLayerBase):
         """
         for state in (ssm_state, conv_state):
             current_state = state[indices]
+            # Dynamic trailing 1s: current_state is 3D or 4D depending
+            # on whether indices is 1D or 2D. A hardcoded count would
+            # mis-broadcast into a (batch, batch, ...) OOM.
             has_prior_state = has_initial_states.to(
-                current_state.dtype)[:, None, None]
+                current_state.dtype
+            ).view((-1,) + (1,) * (current_state.dim() - 1))
             state[indices] = current_state * has_prior_state

@@ -152,7 +152,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # Buffer for has_initial_states_d (needed for CUDA graph capture).
         # During CG capture all dummy requests have num_computed_tokens==0,
         # so the zeroing code always runs and must use CG-compatible ops.
-        self.has_initial_states_d_buf: torch.Tensor = torch.empty(
+        self.has_initial_states_d: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.bool,
             device=device,
@@ -525,14 +525,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
             # Copy has_initial_states_d into pre-allocated CG buffer.
             if has_initial_states_d is not None:
-                self.has_initial_states_d_buf[: metadata.num_decodes].copy_(
+                self.has_initial_states_d[: metadata.num_decodes].copy_(
                     has_initial_states_d, non_blocking=True
                 )
             else:
-                self.has_initial_states_d_buf[: metadata.num_decodes].fill_(
+                self.has_initial_states_d[: metadata.num_decodes].fill_(
                     True
                 )
-            has_initial_states_d = self.has_initial_states_d_buf[:padded_bs]
+            has_initial_states_d = self.has_initial_states_d[:padded_bs]
             # Padded slots: mark as "has state" so zeroing is a no-op.
             has_initial_states_d[metadata.num_decodes :] = True
 
