@@ -222,17 +222,12 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
                 _place_kernel_tensors(layer, info)
                 layer.process_weights_after_loading(model_config.dtype)
 
-        # No weights were loaded
+        # No weights were loaded during reloading: place kernel tensors back
+        # as a fallback. Note: the first-load dummy case is handled directly
+        # by DummyModelLoader.load_weights() and never reaches here.
         elif info.load_numel <= 0:
-            # first load but received no weights. This happens on dummy load
-            if info.kernel_tensors is None:
-                _layerwise_process(layer, info)
-                continue
-
-            # reloading: place kernel tensors back as a fallback
-            else:
-                logger.warning("%s: Failed to load weights", layer.__class__.__name__)
-                _place_kernel_tensors(layer, info)
+            logger.warning("%s: Failed to load weights", layer.__class__.__name__)
+            _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
