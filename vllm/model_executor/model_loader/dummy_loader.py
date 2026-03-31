@@ -38,6 +38,6 @@ class DummyModelLoader(BaseModelLoader):
                 # materialize the layer, apply dummy weights, and run quantization
                 _layerwise_process(layer, info)
             else:
-                # apply dummy weights to direct parameters
+                # simulate weights loading
                 for tensor in get_layer_tensors(layer).values():
                     initialize_single_dummy_weight(tensor)
