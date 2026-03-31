@@ -35,10 +35,9 @@ class DummyModelLoader(BaseModelLoader):
         for layer in model.modules():
             info = get_layerwise_info(layer)
             if info.can_load():
-                # Online quant layer (meta device): materialize the layer,
-                # apply dummy weights, and run quantization processing.
+                # materialize the layer, apply dummy weights, and run quantization
                 _layerwise_process(layer, info)
             else:
-                # Regular layer: apply dummy weights to direct parameters.
+                # apply dummy weights to direct parameters
                 for tensor in get_layer_tensors(layer).values():
                     initialize_single_dummy_weight(tensor)
