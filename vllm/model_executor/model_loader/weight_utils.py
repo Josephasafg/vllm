@@ -1357,7 +1357,7 @@ def initialize_single_dummy_weight(
     seed: int = 1234,
 ) -> None:
     if param.device.type == "meta":
-        return  # deferred to finalize_layerwise_processing (e.g. online quant)
+        return  # meta tensors are materialized before this is called
 
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():
