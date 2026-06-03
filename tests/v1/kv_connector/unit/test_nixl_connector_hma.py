@@ -856,6 +856,37 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
             (256, 256, 768),
             id="qwen35_27b_tp8",
         ),
+        # ai21labs/AI21-Jamba-Mini-1.6 (Mamba1)
+        # hidden_size=4096, mamba_expand=2 → intermediate_size=8192,
+        # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
+        # Conv state holds only x: a single contiguous sub-projection.
+        pytest.param(
+            "mamba1",
+            1,
+            8192,
+            3,
+            (8192, 16),
+            (8192,),
+            id="jamba_mini_tp1",
+        ),
+        pytest.param(
+            "mamba1",
+            4,
+            2048,
+            3,
+            (2048, 16),
+            (2048,),
+            id="jamba_mini_tp4",
+        ),
+        pytest.param(
+            "mamba1",
+            8,
+            1024,
+            3,
+            (1024, 16),
+            (1024,),
+            id="jamba_mini_tp8",
+        ),
     ],
 )
 def test_derive_mamba_conv_split(
@@ -879,6 +910,7 @@ def test_derive_mamba_conv_split(
     from vllm.v1.kv_cache_interface import MambaSpec
 
     _TYPE_MAP = {
+        "mamba1": MambaAttentionBackendEnum.MAMBA1,
         "mamba2": MambaAttentionBackendEnum.MAMBA2,
         "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN,
     }
@@ -1512,3 +1544,208 @@ def test_build_mamba_remote_mamba2_tp_negative():
     # SSM at conv_size_remote=120: blk 0 then blk 1
     assert result[6] == (1120, 200, 0)
     assert result[7] == (1440, 200, 0)
+
+
+# ---- Mamba1 single-projection tests ----
+
+
+@pytest.mark.cpu_test
+def test_derive_mamba_conv_split_mamba1_temporal_mismatch(monkeypatch):
+    """Mamba1 conv dim and temporal dim 0 must both be intermediate_size/TP."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        derive_mamba_conv_split,
+    )
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    spec = MambaSpec(
+        block_size=64,
+        shapes=((8192, 3), (4096, 16)),  # temporal dim 0 != conv dim
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.MAMBA1,
+    )
+    with pytest.raises(AssertionError, match="doesn't match"):
+        derive_mamba_conv_split(spec, local_tp=1)
+
+
+@pytest.mark.cpu_test
+def test_mamba_conv_split_info_offsets_mamba1():
+    """Mamba1: a single conv sub-projection — one local offset, one remote
+    offset per page, both contiguous TP slices."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        MambaConvSplitInfo,
+    )
+
+    # proj_bytes: (16*3*2=96,)
+    info = MambaConvSplitInfo(
+        conv_rows=3,
+        local_proj_dims=(16,),
+        conv_dtype_size=2,
+        ssm_sizes=(96, 256),
+    )
+    assert info.local_conv_offsets == [(0, 96)]
+
+    # tp_ratio=2: D rank reads its contiguous slice of the larger P page.
+    assert info.remote_conv_offsets(local_rank_offset=0, tp_ratio=2) == [(0, 96)]
+    assert info.remote_conv_offsets(local_rank_offset=1, tp_ratio=2) == [(96, 96)]
+
+    # tp_ratio=-2: P pages are smaller, D reads the entire P conv state.
+    assert info.remote_conv_offsets(local_rank_offset=0, tp_ratio=-2) == [(0, 48)]
+
+
+@pytest.mark.cpu_test
+def test_ssm_regions_per_layer_mamba1():
+    """Mamba1 MambaConvSplitInfo yields 2 SSM regions (conv + temporal)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        MambaConvSplitInfo,
+    )
+
+    mamba1 = MambaConvSplitInfo(
+        conv_rows=3,
+        local_proj_dims=(16,),
+        conv_dtype_size=2,
+        ssm_sizes=(96, 256),
+    )
+    assert len(mamba1.local_conv_offsets) + 1 == 2
+
+
+@pytest.mark.cpu_test
+def test_build_mamba_local_mamba1():
+    """_build_mamba_local for Mamba1 produces 2 descriptors per block per
+    layer (1 conv + 1 SSM temporal)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        MambaConvSplitInfo,
+    )
+
+    # proj_bytes: (16*3*2=96,), ssm_sizes: (conv_state=96, ssm_temporal=256)
+    decomp = MambaConvSplitInfo(
+        conv_rows=3,
+        local_proj_dims=(16,),
+        conv_dtype_size=2,
+        ssm_sizes=(96, 256),
+    )
+    worker = _make_mock_worker_for_desc_build(
+        conv_decomp=decomp,
+        mamba_ssm_size=(96, 256),
+        block_len_per_layer=[352],
+    )
+
+    result = worker._build_mamba_local(base_addresses=[1000], block_size_ratio=1)
+
+    # 2 blocks * (1 conv + 1 SSM temporal) = 4 descriptors
+    assert len(result) == 4, f"Expected 4 descriptors, got {len(result)}"
+
+    # Loop order: for off in offsets: for blk in blocks:
+    # page_stride = 352
+    # conv (off=0, sz=96): blk 0 then blk 1
+    assert result[0] == (1000, 96, 0)
+    assert result[1] == (1352, 96, 0)
+    # SSM temporal (at conv_size=96): blk 0 then blk 1
+    assert result[2] == (1096, 256, 0)
+    assert result[3] == (1448, 256, 0)
+
+
+@pytest.mark.cpu_test
+def test_build_mamba_remote_mamba1_tp_positive():
+    """_build_mamba_remote for Mamba1 with tp_ratio >= 1: D rank reads its
+    contiguous conv and temporal slices from a larger P page."""
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        MambaConvSplitInfo,
+    )
+
+    # D's decomp: conv_rows=3, proj_bytes=(96,), ssm_sizes=(96, 256)
+    decomp = MambaConvSplitInfo(
+        conv_rows=3,
+        local_proj_dims=(16,),
+        conv_dtype_size=2,
+        ssm_sizes=(96, 256),
+    )
+    worker = _make_mock_worker_for_desc_build(
+        conv_decomp=decomp,
+        mamba_ssm_size=(96, 256),
+        tp_rank=1,
+    )
+
+    # P has tp_ratio=2 (each P state is 2x larger)
+    # P's ssm_sizes = (192, 512), block_len = 704
+    meta = MagicMock(spec=NixlAgentMetadata)
+    meta.kv_caches_base_addr = [5000]
+    meta.num_blocks = 4  # 2 logical blocks (4 // 2)
+    meta.block_lens = [704]
+    meta.device_id = 7
+    meta.ssm_sizes = (192, 512)
+
+    transfer_info = MagicMock()
+    transfer_info.remote_physical_blocks_per_logical = 2
+
+    result = worker._build_mamba_remote(meta, tp_ratio=2, transfer_info=transfer_info)
+
+    # 2 logical blocks * (1 conv + 1 SSM temporal) = 4 descriptors
+    assert len(result) == 4
+
+    # tp_ratio=2, effective_ratio=2, local_offset=1%2=1
+    # remote_conv_offsets(1, 2): [(1*96, 96)]
+    # SSM temporal: conv_size_remote=192, ssm_read_size=256 (D-sized),
+    #   offset = 192 + 1*256 = 448
+    # page_stride = 704 * 2 = 1408
+    assert result[0] == (5096, 96, 7)  # conv, blk 0
+    assert result[1] == (6504, 96, 7)  # conv, blk 1
+    assert result[2] == (5448, 256, 7)  # SSM temporal, blk 0
+    assert result[3] == (6856, 256, 7)  # SSM temporal, blk 1
+
+
+@pytest.mark.cpu_test
+def test_build_mamba_remote_mamba1_tp_negative():
+    """_build_mamba_remote for Mamba1 with tp_ratio < 0: P pages are smaller,
+    D reads the entire P conv and temporal states."""
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        MambaConvSplitInfo,
+    )
+
+    # D has 2x state per rank: proj_bytes=(192,), ssm_sizes=(192, 512)
+    decomp = MambaConvSplitInfo(
+        conv_rows=3,
+        local_proj_dims=(32,),
+        conv_dtype_size=2,
+        ssm_sizes=(192, 512),
+    )
+    worker = _make_mock_worker_for_desc_build(
+        conv_decomp=decomp,
+        mamba_ssm_size=(192, 512),
+        block_len_per_layer=[704],
+        tp_rank=0,
+    )
+
+    meta = MagicMock(spec=NixlAgentMetadata)
+    meta.ssm_sizes = (96, 256)  # P-sized (half of D)
+    meta.kv_caches_base_addr = [5000]
+    meta.num_blocks = 2
+    meta.block_lens = [352]  # P page size
+    meta.device_id = 7
+
+    transfer_info = MagicMock()
+    transfer_info.remote_physical_blocks_per_logical = 1
+
+    result = worker._build_mamba_remote(meta, tp_ratio=-2, transfer_info=transfer_info)
+
+    # 2 blocks * (1 conv + 1 SSM temporal) = 4 descriptors
+    assert len(result) == 4
+
+    # tp_ratio=-2: remote_conv_offsets(0, -2) scales down by 2 → [(0, 96)]
+    # SSM: conv_size_remote=96, ssm_read_size=256 (P-sized), offset=96
+    # page_stride = 352 * 1 = 352
+    assert result[0] == (5000, 96, 7)  # conv, blk 0
+    assert result[1] == (5352, 96, 7)  # conv, blk 1
+    assert result[2] == (5096, 256, 7)  # SSM temporal, blk 0
+    assert result[3] == (5448, 256, 7)  # SSM temporal, blk 1

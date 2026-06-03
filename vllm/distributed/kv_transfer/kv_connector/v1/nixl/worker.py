@@ -275,10 +275,9 @@ class NixlConnectorWorker:
         # Number of NIXL descriptor regions per SSM layer per block.
         # KDA: 4 (conv_q, conv_k, conv_v, recurrent)
         # Mamba2/GDN: 3 conv sub-projections + 1 SSM temporal = 4
+        # Mamba1: 1 conv sub-projection (x only) + 1 SSM temporal = 2
         self._ssm_regions_per_layer: int = 0
         if self._has_mamba and self._conv_decomp is not None:
-            # MambaConvSplitInfo: 3 conv sub-projections + 1 SSM temporal = 4
-            # (applies to Mamba2, GDN, and KDA)
             self._ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
         self._mamba_ssm_size = mamba_ssm_size
 
@@ -1073,7 +1072,7 @@ class NixlConnectorWorker:
         """Build remote desc regions per SSM/Mamba layer for hetero-TP."""
         assert self._conv_decomp is not None
 
-        # -- All mamba types: 3 conv sub-projections + SSM temporal --
+        # -- All mamba types: conv sub-projections + SSM temporal --
         effective_ratio = max(tp_ratio, 1)
         local_offset = self.tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
