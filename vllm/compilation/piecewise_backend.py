@@ -39,25 +39,52 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
 
     Used for single-size compilation where we need concrete-shaped inputs.
     The Dynamo-captured graph gives us example inputs with SymInts in them.
+
+    Only symbols that appear in some placeholder's shape scale with the
+    compiled size. Symbols that appear only in strides or storage offsets
+    are layout constants — e.g. the row pitch of a persistent-buffer view
+    like ``mrope_positions[:, :num_tokens]`` — and must keep their
+    trace-time hint; substituting the compile size for them bakes wrong
+    strides into the compiled artifact (issue #50046).
     """
     from torch._prims_common import compute_required_storage_length
     from torch._subclasses.fake_tensor import FakeTensorMode
     from torch.fx.experimental.symbolic_shapes import ShapeEnv, is_symbolic
 
+    placeholders = []
+    for node in graph.graph.nodes:
+        if node.op != "placeholder":
+            break
+        placeholders.append(node)
+
+    shape_symbols = set()
+    for node in placeholders:
+        val = node.meta["example_value"]
+        if isinstance(val, torch.Tensor):
+            for d in val.shape:
+                if is_symbolic(d):
+                    shape_symbols |= d.node.expr.free_symbols
+
     def concretize(sym_val: Any) -> int:
-        """Replace all symbolic variables in a SymInt expression with size."""
         if not is_symbolic(sym_val):
             return int(sym_val)
         expr = sym_val.node.expr
-        return int(expr.subs({s: size for s in expr.free_symbols}))
+        shape_env = sym_val.node.shape_env
+        # var_to_val is deprecated in favor of backed_var_to_val (torch 2.11+)
+        var_to_val = getattr(shape_env, "backed_var_to_val", None)
+        if var_to_val is None:
+            var_to_val = shape_env.var_to_val
+        subs = {
+            s: size if s in shape_symbols else var_to_val.get(s, size)
+            for s in expr.free_symbols
+        }
+        return int(expr.subs(subs))
 
     fake_mode = FakeTensorMode(shape_env=ShapeEnv())
 
     args: list[Any] = []
     with fake_mode:
-        for node in graph.graph.nodes:
-            if node.op != "placeholder":
-                break
+        for node in placeholders:
             val = node.meta["example_value"]
             if isinstance(val, torch.SymInt):
                 args.append(concretize(val))

@@ -254,3 +254,114 @@ def test_inductor_cache_compile_ranges(disable_vllm_compile_cache):
         # Check that cache is used, so the number of calls
         # should be 0
         assert post_grad_range_checker.num_calls == 0
+
+
+def test_create_concrete_args_preserves_layout_symbols():
+    """create_concrete_args must only substitute the compile size for
+    symbols that appear in placeholder shapes. Symbols that appear only in
+    strides (e.g. the row pitch of a persistent-buffer view like
+    mrope_positions[:, :num_tokens]) must keep their trace-time value,
+    otherwise single-size artifacts are compiled for contiguous inputs and
+    crash at runtime with a stride-mismatch assertion (issue #50046).
+    """
+    from vllm.compilation.piecewise_backend import create_concrete_args
+
+    captured: dict[str, fx.GraphModule] = {}
+
+    def backend(gm: fx.GraphModule, example_inputs: list[Any]):
+        captured["gm"] = gm
+        return gm.forward
+
+    def fn(ids: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        return ids.unsqueeze(0) + pos.sum(dim=0, keepdim=True)
+
+    buffer_pitch = 2049
+    buf = torch.zeros(3, buffer_pitch, dtype=torch.int64)
+    ids = torch.zeros(2048, dtype=torch.int64)
+    pos = buf[:, :2048]  # non-dense view: strides (2049, 1)
+    torch._dynamo.mark_dynamic(ids, 0)
+    torch._dynamo.mark_dynamic(pos, 1)
+
+    torch.compile(fn, fullgraph=True, backend=backend)(ids, pos)
+
+    size = 512
+    args = create_concrete_args(captured["gm"], size)
+
+    pos_args = [
+        a
+        for a in args
+        if isinstance(a, torch.Tensor) and a.dim() == 2 and a.shape[0] == 3
+    ]
+    assert len(pos_args) == 1
+    assert tuple(pos_args[0].shape) == (3, size)
+    # the row pitch is a layout constant: it must not be rewritten to `size`
+    assert tuple(pos_args[0].stride()) == (buffer_pitch, 1)
+
+    ids_args = [a for a in args if isinstance(a, torch.Tensor) and a.dim() == 1]
+    assert len(ids_args) == 1
+    assert tuple(ids_args[0].shape) == (size,)
+
+    # the lifted SymInt inputs: token count -> size, stride -> its hint
+    int_args = sorted(a for a in args if isinstance(a, int))
+    assert int_args == [size, buffer_pitch]
+
+
+@support_torch_compile(dynamic_arg_dims={"x": 0, "pos": 1})
+class TestModelWithNonDenseInput(nn.Module):
+    """Model whose `pos` input is a non-dense view, like M-RoPE positions
+    (a slice of a (3, max_num_tokens + 1) persistent buffer)."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        # use pos first so that its lifted layout SymInt precedes the token
+        # count in at least one piecewise subgraph's inputs
+        x = x + pos.to(x.dtype).sum(dim=0, keepdim=True).t()
+        attn_output = torch.empty_like(x)
+        torch.ops.silly.attention(x, x, x, attn_output)
+        x = attn_output + pos.to(x.dtype).sum(dim=0, keepdim=True).t()
+        attn_output = torch.empty_like(x)
+        torch.ops.silly.attention(x, x, x, attn_output)
+        return attn_output + pos.to(x.dtype).sum(dim=0, keepdim=True).t()
+
+
+def test_compile_sizes_with_non_dense_view_input(disable_vllm_compile_cache):
+    """End-to-end regression test for issue #50046: compile_sizes entries
+    must work when a graph input is a non-dense view (M-RoPE positions)."""
+    torch.set_default_device("cuda")
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            compile_sizes=[16],
+        ),
+    )
+
+    with set_current_vllm_config(vllm_config):
+        model = TestModelWithNonDenseInput(vllm_config=vllm_config, prefix="").eval()
+
+    pos_buffer = torch.randint(0, 100, (3, 8193), dtype=torch.int64)
+
+    def eager_reference(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        pos_term = pos.to(x.dtype).sum(dim=0, keepdim=True).t()
+        x = x + pos_term
+        x = 3 * x + pos_term  # silly.attention computes q + k + v = 3x
+        return 3 * x + pos_term
+
+    def run(x: torch.Tensor) -> torch.Tensor:
+        pos = pos_buffer[:, : x.shape[0]]
+        with set_forward_context({}, vllm_config=vllm_config):
+            return model(x, pos)
+
+    with torch.inference_mode():
+        run(torch.randn(BATCH_SIZE, MLP_SIZE))  # trace/compile
+        # dispatches to the single-size (16) entry; crashed with
+        # "expected size 3==3, stride 8193==16" before the fix
+        x = torch.randn(16, MLP_SIZE)
+        out = run(x)
+        torch.testing.assert_close(out, eager_reference(x, pos_buffer[:, :16]))
