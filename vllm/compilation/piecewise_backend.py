@@ -5,7 +5,7 @@ import dataclasses
 import io
 import json
 import pickle
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from pickle import Pickler
 from typing import Any
 
@@ -34,18 +34,48 @@ def get_fake_args_from_graph(graph: fx.GraphModule) -> list[Any]:
     return fake_args
 
 
+def collect_shape_symbols(vals: Iterable[Any]) -> set[Any]:
+    """Free symbols that appear in some tensor's shape.
+
+    These are the dims vLLM marks dynamic (the token count) and scale with
+    the compiled size. Symbols that appear only in strides or storage
+    offsets are layout constants of a view input — e.g. the row pitch of
+    ``mrope_positions[:, :num_tokens]`` — and must not be treated as the
+    token count (issue #50046).
+    """
+    from torch.fx.experimental.symbolic_shapes import is_symbolic
+
+    symbols: set[Any] = set()
+    for val in vals:
+        if isinstance(val, torch.Tensor):
+            for d in val.shape:
+                if is_symbolic(d):
+                    symbols |= d.node.expr.free_symbols
+    return symbols
+
+
+def select_sym_shape_indices(args: Sequence[Any]) -> list[int]:
+    """Indices of SymInt args that can drive shape dispatch.
+
+    PiecewiseBackend dispatches on ``args[sym_shape_indices[0]]``, which
+    must be the number of tokens: prefer SymInts whose symbol appears in a
+    tensor arg's shape, so lifted layout SymInts don't drive dispatch.
+    """
+    sym_indices = [i for i, x in enumerate(args) if isinstance(x, torch.SymInt)]
+    shape_symbols = collect_shape_symbols(args)
+    preferred = [
+        i for i in sym_indices if args[i].node.expr.free_symbols & shape_symbols
+    ]
+    return preferred or sym_indices
+
+
 def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
     """Create Fake example inputs with symbolic dims replaced by a concrete size.
 
     Used for single-size compilation where we need concrete-shaped inputs.
     The Dynamo-captured graph gives us example inputs with SymInts in them.
-
-    Only symbols that appear in some placeholder's shape scale with the
-    compiled size. Symbols that appear only in strides or storage offsets
-    are layout constants — e.g. the row pitch of a persistent-buffer view
-    like ``mrope_positions[:, :num_tokens]`` — and must keep their
-    trace-time hint; substituting the compile size for them bakes wrong
-    strides into the compiled artifact (issue #50046).
+    Only shape symbols scale with the compiled size; layout symbols keep
+    their trace-time hint (see collect_shape_symbols).
     """
     from torch._prims_common import compute_required_storage_length
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -57,13 +87,9 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
             break
         placeholders.append(node)
 
-    shape_symbols = set()
-    for node in placeholders:
-        val = node.meta["example_value"]
-        if isinstance(val, torch.Tensor):
-            for d in val.shape:
-                if is_symbolic(d):
-                    shape_symbols |= d.node.expr.free_symbols
+    shape_symbols = collect_shape_symbols(
+        node.meta["example_value"] for node in placeholders
+    )
 
     def concretize(sym_val: Any) -> int:
         if not is_symbolic(sym_val):

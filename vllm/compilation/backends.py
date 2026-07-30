@@ -743,33 +743,12 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
             index = self.compile_submod_names.index(target)
             submod = self.fetch_attr(target)
 
-            # PiecewiseBackend dispatches on args[sym_shape_indices[0]], which
-            # must be the number of tokens. Prefer SymInts whose symbol appears
-            # in a tensor arg's shape: lifted layout symbols (e.g. the row
-            # pitch of a non-dense view input like mrope positions) are also
-            # SymInt args but must not drive dispatch (issue #50046).
-            shape_symbols = set()
-            for x in args:
-                if isinstance(x, torch.Tensor):
-                    for d in x.shape:
-                        if isinstance(d, torch.SymInt):
-                            shape_symbols |= d.node.expr.free_symbols
-
-            sym_shape_indices = [
-                i
-                for i, x in enumerate(args)
-                if isinstance(x, torch.SymInt)
-                and (x.node.expr.free_symbols & shape_symbols)
-            ]
-            if not sym_shape_indices:
-                sym_shape_indices = [
-                    i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
-                ]
-
             # Lazy import here to avoid circular import
             from torch._inductor.compile_fx import graph_returns_tuple
 
-            from .piecewise_backend import PiecewiseBackend
+            from .piecewise_backend import PiecewiseBackend, select_sym_shape_indices
+
+            sym_shape_indices = select_sym_shape_indices(args)
 
             piecewise_backend = PiecewiseBackend(
                 submod,
